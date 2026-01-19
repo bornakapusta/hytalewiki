@@ -1,5 +1,6 @@
 # generated types
 /server-docs/.astro/
+/server-docs/dist/
 
 # dependencies
 /server-docs/node_modules/
