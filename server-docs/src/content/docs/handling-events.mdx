@@ -204,8 +204,185 @@ eventRegistry.registerUnhandled(SomeEvent::class.java) { event ->
 }
 ```
 
+## Advanced Patterns
+
+### Multi-Listener Coordination
+
+When multiple plugins need to process the same event:
+
+```kotlin
+// Plugin A - Runs first, sets up data
+eventRegistry.register(EventPriority.LOW, PlayerConnectEvent::class.java) { event ->
+    val holder = event.holder
+    // Add a custom component other listeners can use
+    holder.addComponent(CustomDataType, CustomData())
+}
+
+// Plugin B - Runs later, uses the data
+eventRegistry.register(EventPriority.HIGH, PlayerConnectEvent::class.java) { event ->
+    val holder = event.holder
+    val customData = holder.getComponent(CustomDataType)
+    // Use data set by Plugin A
+}
+```
+
+### Event Cancellation Edge Cases
+
+```kotlin
+// Check if already cancelled
+eventRegistry.register(EventPriority.HIGH, PlaceBlockEvent::class.java) { event ->
+    if (event.isCancelled) {
+        // Another listener already cancelled - respect that decision
+        return@register
+    }
+
+    // Your cancellation logic
+    if (shouldCancel(event)) {
+        event.cancel()
+    }
+}
+
+// MONITOR priority should never cancel
+eventRegistry.register(EventPriority.MONITOR, PlaceBlockEvent::class.java) { event ->
+    // Only log - never modify or cancel at MONITOR priority
+    if (event.isCancelled) {
+        logger.info("Block placement was cancelled at ${event.position}")
+    } else {
+        logger.info("Block placed at ${event.position}")
+    }
+}
+```
+
+### Async Event Processing
+
+For events that support async processing (I/O operations, database calls):
+
+```kotlin
+eventRegistry.registerAsync(SomeAsyncEvent::class.java) { future ->
+    future.thenCompose { event ->
+        // Perform async operation
+        database.fetchPlayerDataAsync(event.playerId)
+    }.thenApply { data ->
+        // Process result
+        processData(data)
+    }.exceptionally { error ->
+        logger.error("Async processing failed", error)
+        null
+    }
+}
+```
+
+### ECS Events vs Global Events
+
+Hytale has two event systems:
+
+**Global Events** (EventBus) - Server-wide events:
+```kotlin
+// Register via plugin eventRegistry
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    // Runs on event bus thread
+}
+```
+
+**ECS Events** (EntityEventSystem/WorldEventSystem) - Entity-scoped events:
+```kotlin
+// Register as a system in ComponentRegistry
+class DamageEventHandler : EntityEventSystem<EntityStore, DamageEvent>(DamageEvent::class.java) {
+    override fun getQuery() = Query.and(HealthComponentType, Query.not(InvulnerableType))
+
+    override fun handle(
+        index: Int,
+        chunk: ArchetypeChunk<EntityStore>,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>,
+        event: DamageEvent
+    ) {
+        // Runs on world thread, per matching entity
+        val health = chunk.getComponent(index, HealthComponentType)
+        health.damage(event.amount)
+    }
+}
+```
+
+### Thread Safety
+
+Events run on specific threads:
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    // This runs on the event bus thread, NOT the world thread
+
+    val world = event.world ?: return@register
+
+    // For world modifications, schedule on world thread
+    world.execute {
+        // Safe to modify world here
+        world.entityStore.store.addEntity(holder, AddReason.SPAWN)
+    }
+}
+```
+
+### Event Chains
+
+Trigger follow-up events after processing:
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+
+    // Schedule a welcome message after player fully loads
+    HytaleServer.SCHEDULED_EXECUTOR.schedule({
+        playerRef.holder?.getComponent(Player.getComponentType())?.let { player ->
+            player.sendMessage(Message.raw("Welcome to the server!"))
+
+            // Could trigger custom event here
+            eventRegistry.post(PlayerWelcomedEvent(playerRef))
+        }
+    }, 2, TimeUnit.SECONDS)
+}
+```
+
+### Temporary Event Handlers
+
+Register handlers that auto-unregister:
+
+```kotlin
+class OneTimeHandler(private val targetUuid: UUID) {
+    private lateinit var registration: EventRegistration
+
+    fun register(eventRegistry: EventRegistry) {
+        registration = eventRegistry.register(PlayerReadyEvent::class.java) { event ->
+            if (event.playerRef?.uuid == targetUuid) {
+                handleFirstReady(event)
+                registration.unregister()  // Remove this listener
+            }
+        }
+    }
+
+    private fun handleFirstReady(event: PlayerReadyEvent) {
+        // One-time processing
+    }
+}
+```
+
+### Error Handling
+
+Prevent one handler from breaking others:
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    try {
+        riskyOperation(event)
+    } catch (e: Exception) {
+        logger.error("Failed to process connect event", e)
+        // Don't rethrow - allow other handlers to run
+    }
+}
+```
+
 ## Next Steps
 
 - [Event List](/event-list) - All available events
 - [Creating Commands](/creating-commands) - Add commands
 - [Working with Players](/working-with-players) - Player manipulation
+- [Advanced ECS](/advanced-ecs) - ECS event systems in depth

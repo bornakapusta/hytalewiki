@@ -1,0 +1,588 @@
+---
+title: System Types Reference
+description: Complete reference for all ECS system types
+---
+
+## Overview
+
+Systems process entities and respond to events. All systems extend the base `System` class and implement specific interfaces for different execution patterns.
+
+## System Base Class
+
+```java
+public abstract class System<ECS_TYPE> implements ISystem<ECS_TYPE> {
+    // Register components for this system
+    protected <T extends Component<ECS_TYPE>> ComponentType<ECS_TYPE, T> registerComponent(
+        Class<? super T> tClass,
+        String id,
+        BuilderCodec<T> codec
+    )
+
+    // Register resources for this system
+    public <T extends Resource<ECS_TYPE>> ResourceType<ECS_TYPE, T> registerResource(
+        Class<? super T> tClass,
+        String id,
+        BuilderCodec<T> codec
+    )
+
+    // Get registered components/resources
+    public List<ComponentRegistration<ECS_TYPE, ?>> getComponentRegistrations()
+    public List<ResourceRegistration<ECS_TYPE, ?>> getResourceRegistrations()
+}
+```
+
+## System Type Hierarchy
+
+```
+ISystem<ECS_TYPE>
+├── System<ECS_TYPE>
+│   ├── TickingSystem              → tick(deltaTime, tick, store)
+│   │   ├── EntityTickingSystem    → tick per entity in query
+│   │   └── ArchetypeTickingSystem → tick per archetype chunk
+│   ├── RefSystem                  → onEntityAdded/onEntityRemove
+│   ├── RefChangeSystem            → onComponentAdded/Set/Removed
+│   └── EventSystem<EventType>
+│       ├── EntityEventSystem      → handle(index, chunk, store, buffer, event)
+│       └── WorldEventSystem       → handle(store, buffer, event)
+```
+
+## TickingSystem
+
+Called every game tick. Most common system type.
+
+```java
+public abstract class TickingSystem<ECS_TYPE> extends System<ECS_TYPE>
+    implements TickableSystem<ECS_TYPE> {
+
+    public abstract void tick(float deltaTime, int tick, Store<ECS_TYPE> store);
+}
+```
+
+### Example
+
+```java
+public class PhysicsSystem extends TickingSystem<EntityStore> {
+    @Override
+    public void tick(float deltaTime, int tick, Store<EntityStore> store) {
+        Query<EntityStore> query = Query.and(
+            TransformComponentType,
+            VelocityComponentType,
+            Query.not(FrozenComponentType)
+        );
+
+        CommandBuffer<EntityStore> buffer = store.takeCommandBuffer();
+
+        for (ArchetypeChunk<EntityStore> chunk : store.getChunks(query)) {
+            for (int i = 0; i < chunk.size(); i++) {
+                TransformComponent transform = chunk.getComponent(i, TransformComponentType);
+                Velocity velocity = chunk.getComponent(i, VelocityComponentType);
+
+                // Apply velocity
+                Vector3d pos = transform.getPosition();
+                pos.x += velocity.x * deltaTime;
+                pos.y += velocity.y * deltaTime;
+                pos.z += velocity.z * deltaTime;
+
+                // Apply gravity
+                velocity.y -= 9.8 * deltaTime;
+            }
+        }
+
+        store.executeCommandBuffer(buffer);
+    }
+}
+```
+
+## EntityTickingSystem
+
+Automatically iterates entities matching a query.
+
+```java
+public abstract class EntityTickingSystem<ECS_TYPE> extends TickingSystem<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE> {
+
+    // Override to specify which entities to process
+    public abstract Query<ECS_TYPE> getQuery();
+
+    // Called for each entity
+    public abstract void tick(
+        float deltaTime,
+        int tick,
+        int index,
+        ArchetypeChunk<ECS_TYPE> chunk,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+}
+```
+
+### Example
+
+```java
+public class DespawnTimerSystem extends EntityTickingSystem<EntityStore> {
+    @Override
+    public Query<EntityStore> getQuery() {
+        return DespawnComponentType;
+    }
+
+    @Override
+    public void tick(
+        float deltaTime,
+        int tick,
+        int index,
+        ArchetypeChunk<EntityStore> chunk,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        DespawnComponent despawn = chunk.getComponent(index, DespawnComponentType);
+        TimeResource time = buffer.getResource(TimeResourceType);
+
+        if (time.now().isAfter(despawn.getTimeToDespawnAt())) {
+            buffer.removeEntity(chunk.getRef(index), RemoveReason.REMOVE);
+        }
+    }
+}
+```
+
+## ArchetypeTickingSystem
+
+Iterates per-archetype chunk rather than per-entity.
+
+```java
+public abstract class ArchetypeTickingSystem<ECS_TYPE> extends TickingSystem<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE> {
+
+    public abstract Query<ECS_TYPE> getQuery();
+
+    // Called for each matching archetype chunk
+    public abstract void tick(
+        float deltaTime,
+        int tick,
+        ArchetypeChunk<ECS_TYPE> chunk,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+}
+```
+
+### Example - Batch Processing
+
+```java
+public class BatchVelocitySystem extends ArchetypeTickingSystem<EntityStore> {
+    @Override
+    public Query<EntityStore> getQuery() {
+        return Query.and(TransformComponentType, VelocityComponentType);
+    }
+
+    @Override
+    public void tick(
+        float deltaTime,
+        int tick,
+        ArchetypeChunk<EntityStore> chunk,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        int size = chunk.size();
+        // Process entire chunk with SIMD-friendly access patterns
+        for (int i = 0; i < size; i++) {
+            TransformComponent t = chunk.getComponent(i, TransformComponentType);
+            Velocity v = chunk.getComponent(i, VelocityComponentType);
+            t.getPosition().add(v.x * deltaTime, v.y * deltaTime, v.z * deltaTime);
+        }
+    }
+}
+```
+
+## QuerySystem
+
+Interface for systems that filter entities by query.
+
+```java
+public interface QuerySystem<ECS_TYPE> extends ISystem<ECS_TYPE> {
+    // Test if this system should process an archetype
+    default boolean test(ComponentRegistry<ECS_TYPE> registry, Archetype<ECS_TYPE> archetype) {
+        return getQuery().test(archetype);
+    }
+
+    // The query defining which entities to process
+    Query<ECS_TYPE> getQuery();
+}
+```
+
+## RefSystem
+
+Hooks into entity add/remove lifecycle.
+
+```java
+public abstract class RefSystem<ECS_TYPE> extends System<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE> {
+
+    // Called when entity added to store
+    public abstract void onEntityAdded(
+        Ref<ECS_TYPE> ref,
+        AddReason reason,       // SPAWN or LOAD
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+
+    // Called before entity removed
+    public abstract void onEntityRemove(
+        Ref<ECS_TYPE> ref,
+        RemoveReason reason,    // REMOVE or UNLOAD
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+}
+```
+
+### Example - Cleanup System
+
+```java
+public class EntityCleanupSystem extends RefSystem<EntityStore> {
+
+    @Override
+    public Query<EntityStore> getQuery() {
+        return Query.any();  // All entities
+    }
+
+    @Override
+    public void onEntityAdded(
+        Ref<EntityStore> ref,
+        AddReason reason,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        if (reason == AddReason.SPAWN) {
+            // Initialize newly spawned entity
+            logger.info("Entity spawned: {}", ref);
+        }
+    }
+
+    @Override
+    public void onEntityRemove(
+        Ref<EntityStore> ref,
+        RemoveReason reason,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        if (reason == RemoveReason.REMOVE) {
+            // Cleanup resources
+            cleanup(store, ref);
+        }
+    }
+}
+```
+
+## RefChangeSystem
+
+Tracks changes to specific component types.
+
+```java
+public abstract class RefChangeSystem<ECS_TYPE, T extends Component<ECS_TYPE>>
+    extends System<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE> {
+
+    // Which component to track
+    public abstract ComponentType<ECS_TYPE, T> componentType();
+
+    // Component added to entity
+    public abstract void onComponentAdded(
+        Ref<ECS_TYPE> ref,
+        T component,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+
+    // Component replaced (oldComponent may be null for first set)
+    public abstract void onComponentSet(
+        Ref<ECS_TYPE> ref,
+        T oldComponent,
+        T newComponent,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+
+    // Component removed from entity
+    public abstract void onComponentRemoved(
+        Ref<ECS_TYPE> ref,
+        T component,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+}
+```
+
+### Example - Network Sync
+
+```java
+public class TransformSyncSystem extends RefChangeSystem<EntityStore, TransformComponent> {
+
+    @Override
+    public ComponentType<EntityStore, TransformComponent> componentType() {
+        return TransformComponentType;
+    }
+
+    @Override
+    public void onComponentAdded(
+        Ref<EntityStore> ref,
+        TransformComponent transform,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        broadcastPosition(ref, transform);
+    }
+
+    @Override
+    public void onComponentSet(
+        Ref<EntityStore> ref,
+        TransformComponent old,
+        TransformComponent current,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        // Only sync if position changed significantly
+        if (old == null || current.getPosition().distanceSquaredTo(old.getPosition()) > 0.01) {
+            broadcastPosition(ref, current);
+        }
+    }
+
+    @Override
+    public void onComponentRemoved(
+        Ref<EntityStore> ref,
+        TransformComponent transform,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        // Nothing needed
+    }
+
+    @Override
+    public Query<EntityStore> getQuery() {
+        return Query.and(TransformComponentType, NetworkIdComponentType);
+    }
+}
+```
+
+## EntityEventSystem
+
+Handles events targeted at specific entities.
+
+```java
+public abstract class EntityEventSystem<ECS_TYPE, EventType extends EcsEvent>
+    extends EventSystem<EventType>
+    implements QuerySystem<ECS_TYPE> {
+
+    protected EntityEventSystem(Class<EventType> eventType);
+
+    // Handle event for specific entity
+    public abstract void handle(
+        int index,
+        ArchetypeChunk<ECS_TYPE> chunk,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer,
+        EventType event
+    );
+
+    // Internal - checks shouldProcessEvent
+    public void handleInternal(...);
+}
+```
+
+### Example - Damage Handler
+
+```java
+public class DamageHandler extends EntityEventSystem<EntityStore, DamageEvent> {
+
+    public DamageHandler() {
+        super(DamageEvent.class);
+    }
+
+    @Override
+    public Query<EntityStore> getQuery() {
+        return Query.and(HealthComponentType, Query.not(InvulnerableType));
+    }
+
+    @Override
+    public void handle(
+        int index,
+        ArchetypeChunk<EntityStore> chunk,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer,
+        DamageEvent event
+    ) {
+        HealthComponent health = chunk.getComponent(index, HealthComponentType);
+        health.damage(event.getAmount());
+
+        if (health.getCurrent() <= 0) {
+            buffer.addComponent(chunk.getRef(index), DeathComponentType, new DeathComponent());
+        }
+    }
+}
+```
+
+## WorldEventSystem
+
+Handles events affecting the entire world.
+
+```java
+public abstract class WorldEventSystem<ECS_TYPE, EventType extends EcsEvent>
+    extends EventSystem<EventType>
+    implements ISystem<ECS_TYPE> {
+
+    protected WorldEventSystem(Class<EventType> eventType);
+
+    // Handle world-wide event
+    public abstract void handle(
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer,
+        EventType event
+    );
+}
+```
+
+### Example - Weather System
+
+```java
+public class WeatherHandler extends WorldEventSystem<EntityStore, WeatherChangeEvent> {
+
+    public WeatherHandler() {
+        super(WeatherChangeEvent.class);
+    }
+
+    @Override
+    public void handle(
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer,
+        WeatherChangeEvent event
+    ) {
+        WeatherResource weather = buffer.getResource(WeatherResourceType);
+        weather.setCurrentWeather(event.getNewWeather());
+        weather.setIntensity(event.getIntensity());
+
+        // Notify all entities with weather tracking
+        for (ArchetypeChunk<EntityStore> chunk : store.getChunks(WeatherTrackerType)) {
+            for (int i = 0; i < chunk.size(); i++) {
+                WeatherTracker tracker = chunk.getComponent(i, WeatherTrackerType);
+                tracker.onWeatherChange(event.getNewWeather());
+            }
+        }
+    }
+}
+```
+
+## DelayedSystem
+
+Base for systems with delayed execution.
+
+```java
+public abstract class DelayedSystem<ECS_TYPE> extends System<ECS_TYPE>
+    implements Resource<ECS_TYPE> {
+
+    // Queue task for later execution
+    protected void schedule(Runnable task, long delayMs);
+
+    // Process queued tasks
+    protected void processDelayed(Store<ECS_TYPE> store);
+}
+```
+
+## DelayedEntitySystem
+
+Entity system with per-entity delays.
+
+```java
+public abstract class DelayedEntitySystem<ECS_TYPE> extends TickingSystem<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE>, Resource<ECS_TYPE> {
+
+    // Schedule per-entity delayed action
+    protected void scheduleForEntity(
+        Ref<ECS_TYPE> ref,
+        long delayMs,
+        Consumer<Ref<ECS_TYPE>> action
+    );
+}
+```
+
+## HolderSystem
+
+System for processing Holder objects before entity insertion.
+
+```java
+public abstract class HolderSystem<ECS_TYPE> extends System<ECS_TYPE> {
+
+    // Process holder before entity added
+    public abstract void processHolder(
+        Holder<ECS_TYPE> holder,
+        Store<ECS_TYPE> store
+    );
+}
+```
+
+## MetricSystem
+
+System with built-in performance metrics.
+
+```java
+public abstract class MetricSystem<ECS_TYPE> extends TickingSystem<ECS_TYPE> {
+
+    // Get metrics for this system
+    public SystemMetricData getMetrics();
+
+    // Automatically tracks:
+    // - tick duration
+    // - entity count processed
+    // - memory allocations
+}
+```
+
+## RunWhenPausedSystem
+
+System that runs even when game is paused.
+
+```java
+public abstract class RunWhenPausedSystem<ECS_TYPE> extends TickingSystem<ECS_TYPE> {
+    // Always ticks, regardless of pause state
+}
+```
+
+## Registering Systems
+
+```java
+public class MyPlugin implements Plugin {
+    @Override
+    public void onEnable(PluginContext context) {
+        ComponentRegistry<EntityStore> registry = context.getEntityRegistry();
+
+        // Register systems
+        registry.registerSystem(new PhysicsSystem());
+        registry.registerSystem(new DespawnTimerSystem());
+        registry.registerSystem(new DamageHandler());
+
+        // Systems are automatically ordered by dependencies
+    }
+}
+```
+
+## System Dependencies
+
+Systems declare execution order via dependencies.
+
+```java
+public class MySystem extends TickingSystem<EntityStore> {
+    @Override
+    public Set<Dependency<EntityStore>> getDependencies() {
+        return Set.of(
+            // Run after physics
+            new SystemTypeDependency<>(Order.AFTER, PhysicsSystemType),
+            // Run before rendering
+            new SystemTypeDependency<>(Order.BEFORE, RenderSystemType)
+        );
+    }
+}
+```
+
+## See Also
+
+- [ECS Components](/ecs-components) - Core ECS architecture
+- [Advanced ECS Patterns](/advanced-ecs) - Advanced patterns
+- [Custom Components](/custom-components) - Creating components

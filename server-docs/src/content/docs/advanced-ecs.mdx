@@ -1,0 +1,531 @@
+---
+title: Advanced ECS Patterns
+description: Advanced Entity Component System patterns - mutation tracking, spatial queries, performance
+---
+
+## Overview
+
+This guide covers advanced ECS patterns used in Hytale's server architecture: deferred command buffers, weak references, change tracking systems, and spatial indexing for high-performance entity queries.
+
+## WeakComponentReference
+
+`WeakComponentReference` provides a GC-friendly way to reference components without preventing cleanup.
+
+```java
+public class WeakComponentReference<ECS_TYPE, T extends Component<ECS_TYPE>> {
+    private final Store<ECS_TYPE> store;
+    private final ComponentType<ECS_TYPE, T> type;
+    private Ref<ECS_TYPE> ref;
+    private WeakReference<T> reference;
+
+    // Get component (re-fetches if GC'd)
+    public T get()
+
+    // Access backing data
+    public Store<ECS_TYPE> getStore()
+    public ComponentType<ECS_TYPE, T> getType()
+    public Ref<ECS_TYPE> getEntityReference()
+
+    // Called when entity removed
+    void invalidate()
+}
+```
+
+### How It Works
+
+1. Stores a `WeakReference` to the component data
+2. If reference is GC'd but entity still valid, re-fetches from store
+3. Automatically invalidated when entity is removed
+
+### Use Cases
+
+```java
+public class TargetTracker {
+    private WeakComponentReference<EntityStore, TransformComponent> targetRef;
+
+    public void setTarget(Store<EntityStore> store, Ref<EntityStore> target) {
+        TransformComponent transform = store.getComponent(target, TransformComponentType);
+        if (transform != null) {
+            targetRef = new WeakComponentReference<>(store, TransformComponentType, target, transform);
+        }
+    }
+
+    public Vector3d getTargetPosition() {
+        if (targetRef == null) return null;
+
+        TransformComponent transform = targetRef.get();
+        if (transform == null) return null;  // Entity was removed
+
+        return transform.getPosition();
+    }
+}
+```
+
+### Benefits
+
+- Memory efficient - doesn't prevent GC of unused components
+- Safe - automatically handles entity removal
+- Convenient - re-fetches transparently if needed
+
+## RefChangeSystem - Mutation Tracking
+
+`RefChangeSystem` triggers callbacks when specific component types are added, modified, or removed from entities.
+
+```java
+public abstract class RefChangeSystem<ECS_TYPE, T extends Component<ECS_TYPE>>
+    extends System<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE> {
+
+    // Declare which component to track
+    public abstract ComponentType<ECS_TYPE, T> componentType();
+
+    // Called when component added to entity
+    public abstract void onComponentAdded(
+        Ref<ECS_TYPE> ref,
+        T component,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+
+    // Called when component replaced/modified
+    public abstract void onComponentSet(
+        Ref<ECS_TYPE> ref,
+        T oldComponent,      // null if first set
+        T newComponent,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+
+    // Called when component removed
+    public abstract void onComponentRemoved(
+        Ref<ECS_TYPE> ref,
+        T component,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+}
+```
+
+### Example: Spatial Index Updates
+
+```java
+public class SpatialIndexSystem extends RefChangeSystem<EntityStore, TransformComponent> {
+
+    @Override
+    public ComponentType<EntityStore, TransformComponent> componentType() {
+        return TransformComponentType;
+    }
+
+    @Override
+    public void onComponentAdded(
+        Ref<EntityStore> ref,
+        TransformComponent transform,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        SpatialResource spatial = buffer.getResource(SpatialResourceType);
+        spatial.getSpatialData().add(ref, transform.getPosition());
+    }
+
+    @Override
+    public void onComponentSet(
+        Ref<EntityStore> ref,
+        TransformComponent old,
+        TransformComponent current,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        SpatialResource spatial = buffer.getResource(SpatialResourceType);
+        spatial.getSpatialData().update(ref, current.getPosition());
+    }
+
+    @Override
+    public void onComponentRemoved(
+        Ref<EntityStore> ref,
+        TransformComponent transform,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        SpatialResource spatial = buffer.getResource(SpatialResourceType);
+        spatial.getSpatialData().remove(ref);
+    }
+
+    @Override
+    public Query<EntityStore> getQuery() {
+        return TransformComponentType;  // Only process entities with Transform
+    }
+}
+```
+
+### Use Cases
+
+- Maintaining spatial indices
+- Syncing network state when components change
+- Triggering side effects on state changes
+- Cache invalidation
+
+## Spatial Components
+
+Hytale uses spatial data structures for efficient proximity queries.
+
+### SpatialResource
+
+Global resource managing spatial indexing for a store.
+
+```java
+public class SpatialResource<T, ECS_TYPE> implements Resource<ECS_TYPE> {
+    private final SpatialData<Ref<ECS_TYPE>> spatialData;
+    private final SpatialStructure<T> spatialStructure;
+
+    public SpatialData<Ref<ECS_TYPE>> getSpatialData()
+    public SpatialStructure<T> getSpatialStructure()
+
+    // Thread-local list for query results (avoids allocation)
+    public static <ECS_TYPE> ObjectList<Ref<ECS_TYPE>> getThreadLocalReferenceList()
+}
+```
+
+### SpatialStructure Interface
+
+```java
+public interface SpatialStructure<T> {
+    int size();
+
+    // Rebuild index from data
+    void rebuild(SpatialData<T> spatialData);
+
+    // Find single closest entity
+    T closest(Vector3d point);
+
+    // Collect entities in radius
+    void collect(Vector3d center, double radius, List<T> results);
+
+    // Collect in cylinder (radius + height)
+    void collectCylinder(Vector3d center, double radius, double height, List<T> results);
+
+    // Collect in box
+    void collectBox(Vector3d min, Vector3d max, List<T> results);
+
+    // Get ordered by distance
+    void ordered(Vector3d center, double radius, List<T> results);
+
+    // Per-axis search radii
+    void ordered3DAxis(Vector3d center, double xRadius, double yRadius, double zRadius, List<T> results);
+}
+```
+
+### KDTree Implementation
+
+Hytale uses a KD-tree for efficient spatial queries.
+
+```java
+public class KDTree<T> implements SpatialStructure<T> {
+    private Node<T> root;
+    private final Predicate<T> collectionFilter;
+
+    // Uses Morton code sorting for balanced construction
+    public void rebuild(SpatialData<T> spatialData)
+
+    // O(log n) closest query
+    public T closest(Vector3d point)
+
+    // Efficient range queries
+    public void collect(Vector3d center, double radius, List<T> results)
+}
+```
+
+### Using Spatial Queries
+
+```java
+public void findNearbyEnemies(
+    Store<EntityStore> store,
+    Vector3d position,
+    double radius
+) {
+    SpatialResource<Ref<EntityStore>, EntityStore> spatial =
+        store.getResource(SpatialResourceType);
+
+    // Get thread-local list (avoids allocation)
+    ObjectList<Ref<EntityStore>> nearby = SpatialResource.getThreadLocalReferenceList();
+
+    // Query spatial index
+    spatial.getSpatialStructure().collect(position, radius, nearby);
+
+    // Process results
+    for (Ref<EntityStore> ref : nearby) {
+        if (!ref.isValid()) continue;
+
+        // Check if enemy
+        NPCComponent npc = store.getComponent(ref, NPCComponentType);
+        if (npc != null && npc.isHostile()) {
+            // Handle enemy...
+        }
+    }
+}
+```
+
+### Morton Code Optimization
+
+The KDTree uses Morton codes (Z-order curve) for cache-efficient construction:
+
+```java
+// MortonCode.java - interleaves x, y, z bits for spatial locality
+public class MortonCode {
+    public static long encode(double x, double y, double z)
+    public static void decode(long morton, Vector3d result)
+}
+```
+
+Benefits:
+- Spatially close entities are close in memory
+- Better CPU cache utilization during tree construction
+- Predictable memory access patterns
+
+## RefSystem - Entity Lifecycle
+
+`RefSystem` hooks into entity add/remove lifecycle events.
+
+```java
+public abstract class RefSystem<ECS_TYPE> extends System<ECS_TYPE>
+    implements QuerySystem<ECS_TYPE> {
+
+    // Called when entity added to store
+    public abstract void onEntityAdded(
+        Ref<ECS_TYPE> ref,
+        AddReason reason,           // SPAWN or LOAD
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+
+    // Called before entity removed from store
+    public abstract void onEntityRemove(
+        Ref<ECS_TYPE> ref,
+        RemoveReason reason,        // REMOVE or UNLOAD
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer
+    );
+}
+```
+
+### Example: Network Entity Tracking
+
+```java
+public class NetworkEntityTracker extends RefSystem<EntityStore> {
+
+    @Override
+    public void onEntityAdded(
+        Ref<EntityStore> ref,
+        AddReason reason,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        if (reason == AddReason.SPAWN) {
+            // Assign network ID and broadcast to clients
+            NetworkId networkId = buffer.addComponent(ref, NetworkIdType);
+            networkId.setId(nextNetworkId++);
+            broadcastEntitySpawn(ref, store, buffer);
+        }
+    }
+
+    @Override
+    public void onEntityRemove(
+        Ref<EntityStore> ref,
+        RemoveReason reason,
+        Store<EntityStore> store,
+        CommandBuffer<EntityStore> buffer
+    ) {
+        NetworkId networkId = store.getComponent(ref, NetworkIdType);
+        if (networkId != null && reason == RemoveReason.REMOVE) {
+            broadcastEntityDespawn(networkId.getId());
+        }
+    }
+
+    @Override
+    public Query<EntityStore> getQuery() {
+        return Query.and(TransformComponentType, Query.not(HiddenComponentType));
+    }
+}
+```
+
+## Parallel Command Buffers
+
+For parallel entity processing, use forked command buffers.
+
+```java
+public void processEntitiesParallel(Store<EntityStore> store, Query<EntityStore> query) {
+    CommandBuffer<EntityStore> mainBuffer = store.takeCommandBuffer();
+    List<ArchetypeChunk<EntityStore>> chunks = store.getChunks(query);
+
+    // Process chunks in parallel
+    chunks.parallelStream().forEach(chunk -> {
+        // Fork buffer for this thread
+        CommandBuffer<EntityStore> threadBuffer = mainBuffer.fork();
+
+        for (int i = 0; i < chunk.size(); i++) {
+            // Process entity...
+            processEntity(chunk, i, threadBuffer);
+        }
+
+        // Merge back to main buffer
+        threadBuffer.mergeParallel(mainBuffer);
+    });
+
+    // Execute all queued operations
+    store.executeCommandBuffer(mainBuffer);
+}
+```
+
+### Thread Safety Rules
+
+1. **Reads are safe** - Multiple threads can read from store simultaneously
+2. **Writes must be deferred** - Use CommandBuffer for all modifications
+3. **One buffer per thread** - Fork for parallel processing
+4. **Merge before execute** - All forked buffers must merge back
+
+## ECS Events
+
+ECS has its own event system separate from the global event bus.
+
+### EcsEvent
+
+```java
+public interface EcsEvent {
+    // Marker interface for ECS-specific events
+}
+
+public interface CancellableEcsEvent extends EcsEvent {
+    boolean isCancelled();
+    void setCancelled(boolean cancelled);
+}
+```
+
+### EntityEventSystem
+
+Handles events targeted at specific entities.
+
+```java
+public abstract class EntityEventSystem<ECS_TYPE, EventType extends EcsEvent>
+    extends EventSystem<EventType>
+    implements QuerySystem<ECS_TYPE> {
+
+    protected EntityEventSystem(Class<EventType> eventType);
+
+    public abstract void handle(
+        int index,
+        ArchetypeChunk<ECS_TYPE> chunk,
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer,
+        EventType event
+    );
+}
+```
+
+### WorldEventSystem
+
+Handles events affecting the entire world/store.
+
+```java
+public abstract class WorldEventSystem<ECS_TYPE, EventType extends EcsEvent>
+    extends EventSystem<EventType>
+    implements ISystem<ECS_TYPE> {
+
+    protected WorldEventSystem(Class<EventType> eventType);
+
+    public abstract void handle(
+        Store<ECS_TYPE> store,
+        CommandBuffer<ECS_TYPE> buffer,
+        EventType event
+    );
+}
+```
+
+### Invoking ECS Events
+
+```java
+// Entity-targeted event
+DamageEvent damage = new DamageEvent(10.0f, DamageType.PHYSICAL);
+buffer.invoke(targetRef, damage);
+
+// World-wide event
+WeatherChangeEvent weather = new WeatherChangeEvent(WeatherType.RAIN);
+buffer.invoke(weather);
+```
+
+## Performance Considerations
+
+### Archetype Fragmentation
+
+Adding/removing components changes entity archetype, causing memory moves.
+
+```java
+// BAD - causes archetype change every frame
+buffer.addComponent(ref, TemporaryMarkerType, new TemporaryMarker());
+// ... later
+buffer.removeComponent(ref, TemporaryMarkerType);
+
+// GOOD - use flag in existing component
+TransformComponent t = store.getComponent(ref, TransformType);
+t.setTemporaryFlag(true);
+```
+
+### Query Caching
+
+Cache frequently-used queries:
+
+```java
+// Cache as static field
+private static final Query<EntityStore> MOVABLE_QUERY = Query.and(
+    TransformComponentType,
+    VelocityComponentType,
+    Query.not(FrozenComponentType)
+);
+```
+
+### Batch Operations
+
+Process entities in batches for better cache utilization:
+
+```java
+for (ArchetypeChunk<EntityStore> chunk : store.getChunks(query)) {
+    // All entities in chunk have same components
+    // Access pattern is cache-friendly
+    int size = chunk.size();
+    for (int i = 0; i < size; i++) {
+        // Components laid out contiguously in memory
+        process(chunk, i);
+    }
+}
+```
+
+### Avoid Per-Entity Allocations
+
+```java
+// BAD - allocates per entity
+for (int i = 0; i < chunk.size(); i++) {
+    Vector3d temp = new Vector3d();  // Allocation!
+    // ...
+}
+
+// GOOD - reuse outside loop
+Vector3d temp = new Vector3d();
+for (int i = 0; i < chunk.size(); i++) {
+    temp.set(0, 0, 0);  // Reset and reuse
+    // ...
+}
+
+// BEST - use thread-local pools
+Vector3d temp = VectorPool.get();
+try {
+    for (int i = 0; i < chunk.size(); i++) {
+        // ...
+    }
+} finally {
+    VectorPool.release(temp);
+}
+```
+
+## See Also
+
+- [ECS Components](/ecs-components) - Core ECS architecture
+- [System Types](/system-types) - All system type implementations
+- [Spawning Entities](/spawning-entities) - Entity creation patterns

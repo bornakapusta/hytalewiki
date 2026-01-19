@@ -1,11 +1,11 @@
 ---
 title: ECS Components
-description: Entity Component System deep dive
+description: Entity Component System deep dive - complete reference
 ---
 
 ## Overview
 
-Hytale uses a sophisticated **Entity Component System (ECS)** with 90+ core classes supporting flexible entity composition, resource management, and system-based processing.
+Hytale uses a sophisticated **Entity Component System (ECS)** with 90+ core framework classes and 130+ built-in component implementations supporting flexible entity composition, resource management, and system-based processing.
 
 ## Core Architecture
 
@@ -15,11 +15,17 @@ Component<ECS_TYPE> (interface)
 └── Methods: clone(), cloneSerializable()
 
 Resource<ECS_TYPE> (interface)
-├── Global/shared data
+├── Global/shared data (not tied to entities)
 └── Method: clone()
+
+ComponentType<ECS_TYPE, T> - Type handle for component registration
+ResourceType<ECS_TYPE, T> - Type handle for resource registration
+SystemType<ECS_TYPE, T> - Type handle for system registration
 ```
 
 ## Store/Ref/Holder Pattern
+
+The ECS uses three core types for entity management:
 
 ### Ref - Entity Reference
 
@@ -30,12 +36,12 @@ public class Ref<ECS_TYPE> {
 
     public Store<ECS_TYPE> getStore()
     public int getIndex()
-    public boolean isValid()
-    public void invalidate()
+    public boolean isValid()  // Check if entity still exists
+    public void invalidate()  // Mark as invalid
 }
 ```
 
-**Purpose:** Persistent reference that survives internal reorganization.
+**Purpose:** Stable reference that survives internal reorganization. Always check `isValid()` before use.
 
 ### Holder - Component Container
 
@@ -47,11 +53,12 @@ public class Holder<ECS_TYPE> {
     public <T> void addComponent(ComponentType<T> type, T component)
     public <T> T getComponent(ComponentType<T> type)
     public <T> void removeComponent(ComponentType<T> type)
+    public boolean hasComponent(ComponentType<T> type)
     public Holder<ECS_TYPE> clone()
 }
 ```
 
-**Purpose:** Staging area for entity composition before insertion.
+**Purpose:** Staging area for entity composition before insertion, or temporary container when extracting entities.
 
 ### Store - Entity Management
 
@@ -61,14 +68,43 @@ public class Store<ECS_TYPE> implements ComponentAccessor<ECS_TYPE> {
     private ArchetypeChunk<ECS_TYPE>[] archetypeChunks;
     private Resource<ECS_TYPE>[] resources;
 
+    // Component access
     public <T> T getComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
     public <T> void putComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+    public <T> void addComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+    public <T> void removeComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+
+    // Entity lifecycle
     public Ref<ECS_TYPE> addEntity(Holder<ECS_TYPE> holder, AddReason reason)
     public Holder<ECS_TYPE> removeEntity(Ref<ECS_TYPE> ref, RemoveReason reason)
+
+    // Resources
+    public <T extends Resource<ECS_TYPE>> T getResource(ResourceType<T> type)
+
+    // Query
+    public List<ArchetypeChunk<ECS_TYPE>> getChunks(Query<ECS_TYPE> query)
+
+    // CommandBuffer
+    public CommandBuffer<ECS_TYPE> takeCommandBuffer()
+    public void executeCommandBuffer(CommandBuffer<ECS_TYPE> buffer)
 }
 ```
 
 **Purpose:** Main entity store with archetype-based organization.
+
+### Entity Lifecycle
+
+```java
+public enum AddReason {
+    SPAWN,  // New entity created
+    LOAD    // Entity loaded from persistence
+}
+
+public enum RemoveReason {
+    REMOVE,  // Entity destroyed/despawned
+    UNLOAD   // Entity unloaded for persistence
+}
+```
 
 ## ComponentAccessor Interface
 
@@ -165,35 +201,249 @@ public final class UUIDComponent implements Component<EntityStore> {
 ## Component Categories
 
 ### Transform & Position
-- `TransformComponent` - Position + rotation
-- `PositionDataComponent` - Additional metadata
-- `HeadRotation` - Head direction
+| Component | Description |
+|-----------|-------------|
+| `TransformComponent` | Position (Vector3d) + rotation (Vector3f) + chunk reference |
+| `PositionDataComponent` | Additional position metadata |
+| `HeadRotation` | Head/look direction separate from body |
+| `RotateObjectComponent` | Object rotation state |
+| `BoundingBox` | Collision bounds |
 
 ### Visual/Rendering
-- `ModelComponent` - 3D model reference
-- `DisplayNameComponent` - Display name
-- `EntityScaleComponent` - Scale value
-- `ActiveAnimationComponent` - Animations
+| Component | Description |
+|-----------|-------------|
+| `ModelComponent` | 3D model asset reference |
+| `DisplayNameComponent` | Visible display name |
+| `EntityScaleComponent` | Scale multiplier |
+| `ActiveAnimationComponent` | Current animation state |
+| `PersistentModel` | Model that persists across chunks |
+| `DynamicLight` | Entity emits dynamic light |
+| `PersistentDynamicLight` | Persistent light source |
+| `AudioComponent` | Sound emitter |
+| `MovementAudioComponent` | Movement-triggered sounds |
+| `Nameplate` | Nameplate display |
 
 ### Physics & Movement
-- `Velocity` - Motion vector
-- `PhysicsValues` - Physics config
-- `CollisionResultComponent` - Collision results
-- `KnockbackComponent` - Knockback velocity
+| Component | Description |
+|-----------|-------------|
+| `Velocity` | Movement vector (dx, dy, dz) |
+| `PhysicsValues` | Physics config (gravity, friction, etc.) |
+| `CollisionResultComponent` | Last collision results |
+| `KnockbackComponent` | Knockback velocity |
+| `KnockbackSimulation` | Player knockback simulation |
+| `HitboxCollision` | Hitbox collision data |
+| `MovementStatesComponent` | Movement state (grounded, jumping, etc.) |
+| `MovementManager` | Player movement controller |
+| `Repulsion` | Entity repulsion forces |
+
+### Player-Specific
+| Component | Description |
+|-----------|-------------|
+| `PlayerRef` | Reference to connected player |
+| `PlayerInput` | Current input state |
+| `PlayerSettings` | Player preferences |
+| `PlayerSkinComponent` | Skin data |
+| `ChunkTracker` | Tracks loaded chunks for player |
+| `CameraManager` | Camera control state |
+| `PlayerMemories` | Player memory storage |
+| `TeleportHistory` | Teleport locations |
 
 ### Combat & Damage
-- `DamageDataComponent` - Combat tracking
-- `DeathComponent` - Death state
-- `DamageEffect` - Damage display
+| Component | Description |
+|-----------|-------------|
+| `DamageDataComponent` | Combat tracking (last damage, wielding) |
+| `DeathComponent` | Death state and respawn info |
+| `DeferredCorpseRemoval` | Delayed corpse cleanup |
+| `EffectControllerComponent` | Status effects |
+| `EntityStatMap` | Entity statistics |
+
+### NPC & AI
+| Component | Description |
+|-----------|-------------|
+| `Blackboard` | NPC AI state storage |
+| `StateEvaluator` | NPC state evaluation |
+| `CombatActionEvaluator` | Combat decision making |
+| `TargetMemory` | Target tracking |
+| `DamageMemory` | Damage received tracking |
+| `NPCEntityEventSupport` | Event listeners for NPC |
+| `NPCBlockEventSupport` | Block event listeners for NPC |
+| `MessageSupport` | NPC messaging |
+| `BeaconSupport` | Beacon awareness |
+| `Timers` | NPC timer management |
+| `ValueStore` | NPC value storage |
+| `StepComponent` | NPC step state |
+
+### Spawning & Lifecycle
+| Component | Description |
+|-----------|-------------|
+| `SpawnReference` | Reference to spawn point |
+| `NewSpawnComponent` | Newly spawned marker |
+| `DespawnComponent` | Auto-despawn timing |
+| `FailedSpawnComponent` | Failed spawn marker |
+| `SpawnMarkerEntity` | Spawn marker entity |
+| `SpawnMarkerBlockReference` | Block-based spawn marker |
+| `LocalSpawnBeacon` | Local spawn beacon |
+| `LocalSpawnController` | Local spawn control |
+| `InitialBeaconDelay` | Beacon activation delay |
+| `SpawnSuppressionComponent` | Spawn suppression |
+
+### Items & Inventory
+| Component | Description |
+|-----------|-------------|
+| `ItemComponent` | Item drop data (stack, pickup delay) |
+| `ItemPhysicsComponent` | Item physics behavior |
+| `PickupItemComponent` | Item pickup configuration |
+| `PreventItemMerging` | Disable item stack merging |
+| `PreventPickup` | Disable item pickup |
+| `CraftingManager` | Crafting state |
+
+### Projectiles
+| Component | Description |
+|-----------|-------------|
+| `Projectile` | Projectile behavior |
+| `ProjectileComponent` | Alternative projectile impl |
+| `PredictedProjectile` | Client-predicted projectile |
+| `DeployableProjectileComponent` | Deployable projectile |
+| `DeployableProjectileShooterComponent` | Projectile shooter |
+
+### Flocking & Groups
+| Component | Description |
+|-----------|-------------|
+| `Flock` | Flock membership data |
+| `FlockMembership` | Individual flock membership |
+| `PersistentFlockData` | Persisted flock state |
+| `EntityGroup` | Entity group membership |
+
+### Mounts
+| Component | Description |
+|-----------|-------------|
+| `MountedComponent` | Currently mounted entity |
+| `MountedByComponent` | Entity being ridden |
+| `NPCMountComponent` | NPC mount behavior |
+| `MinecartComponent` | Minecart vehicle |
 
 ### Markers (Singletons)
-- `Interactable` - Can be interacted with
-- `Intangible` - No collision
-- `Invulnerable` - No damage
-- `NonTicking` - Skip tick processing
-- `NonSerialized` - Skip persistence
+| Component | Description |
+|-----------|-------------|
+| `Interactable` | Can be interacted with |
+| `Intangible` | No collision |
+| `Invulnerable` | Cannot take damage |
+| `NonTicking` | Skip tick processing |
+| `NonSerialized` | Skip persistence |
+| `Frozen` | Entity is frozen |
+| `HiddenFromAdventurePlayers` | Hidden in adventure mode |
+| `FromPrefab` | Created from prefab |
+| `FromWorldGen` | Created by world gen |
+| `RespondToHit` | Reacts to being hit |
+
+### World & Environment
+| Component | Description |
+|-----------|-------------|
+| `WeatherTracker` | Weather state tracking |
+| `AmbienceTracker` | Ambient environment tracking |
+| `AmbientEmitterComponent` | Ambient sound/effect emitter |
+| `VoidEvent` | Void event state |
+| `VoidSpawner` | Void event spawner |
+
+### Objectives & Quests
+| Component | Description |
+|-----------|-------------|
+| `ObjectiveHistoryComponent` | Quest objective history |
+| `ReachLocationMarker` | Location objective marker |
+| `ObjectiveLocationMarker` | Objective location marker |
+| `ReputationGroupComponent` | Reputation with groups |
+
+### Networking
+| Component | Description |
+|-----------|-------------|
+| `NetworkId` | Network entity ID |
+| `SnapshotBuffer` | State snapshot buffer |
+| `UUIDComponent` | Unique entity UUID |
+| `PersistentRefCount` | Reference counting |
+
+### Builder Tools
+| Component | Description |
+|-----------|-------------|
+| `BuilderToolsUserData` | Builder tool state |
+| `PrefabAnchor` | Prefab edit anchor |
+| `PrefabEditSession` | Active prefab editing |
+| `PrefabCopyableComponent` | Can be copied in prefab |
+
+### Miscellaneous
+| Component | Description |
+|-----------|-------------|
+| `BlockEntity` | Entity attached to block |
+| `PropComponent` | Prop/decoration entity |
+| `Teleport` | Active teleport state |
+| `PendingTeleport` | Queued teleport |
+| `DeployableComponent` | Deployable item |
+| `DeployableOwnerComponent` | Owner of deployable |
+| `ParkourCheckpoint` | Parkour checkpoint |
+| `WorldPathBuilder` | Path building state |
+| `WorldGenId` | World generation ID |
+| `UIComponentList` | UI component list |
+| `Interactions` | Available interactions |
+| `ChainingInteraction` | Chained interactions |
+| `InteractionManager` | Interaction state |
+
+## ResourceType and Global Resources
+
+Resources are global shared data not tied to specific entities. Useful for world state, time, weather, etc.
+
+### ResourceType Structure
+
+```java
+public class ResourceType<ECS_TYPE, T extends Resource<ECS_TYPE>> {
+    private ComponentRegistry<ECS_TYPE> registry;
+    private Class<? super T> tClass;
+    private int index;
+
+    public ComponentRegistry<ECS_TYPE> getRegistry()
+    public Class<? super T> getTypeClass()
+    public int getIndex()
+    public void validate()  // Check if still registered
+}
+```
+
+### Registering Resources
+
+```java
+public class MySystem extends System<EntityStore> {
+    // Register a resource type
+    public static final ResourceType<EntityStore, TimeResource> TIME_TYPE =
+        registerResource(TimeResource.class, TimeResource::new);
+
+    // With codec for persistence
+    public static final ResourceType<EntityStore, WeatherResource> WEATHER_TYPE =
+        registerResource(WeatherResource.class, "Weather", WeatherResource.CODEC);
+}
+```
+
+### Built-in Resources
+
+| Resource | Purpose |
+|----------|---------|
+| `TimeResource` | Game time tracking |
+| `WorldTimeResource` | World day/night cycle |
+| `WeatherResource` | Weather state |
+| `SpatialResource` | Spatial indexing for queries |
+| `WorldPathData` | Pathfinding data |
+| `BlackboardResource` | NPC AI blackboard |
+| `LocalSpawnState` | Spawn controller state |
+
+### Accessing Resources
+
+```java
+// From Store
+TimeResource time = store.getResource(TimeResourceType);
+
+// From CommandBuffer
+TimeResource time = commandBuffer.getResource(TimeResourceType);
+```
 
 ## Archetype System
+
+Archetypes define component composition templates. Entities with identical components share an archetype for memory efficiency.
 
 ```java
 public class Archetype<ECS_TYPE> implements Query<ECS_TYPE> {
@@ -202,16 +452,32 @@ public class Archetype<ECS_TYPE> implements Query<ECS_TYPE> {
     public boolean contains(ComponentType<ECS_TYPE, ?> type)
     public boolean contains(Archetype<ECS_TYPE> other)
 
-    // Immutable operations
+    // Immutable operations - return new archetypes
     public static Archetype add(archetype, type)
     public static Archetype remove(archetype, type)
-    public static Archetype of(types[])
+    public static Archetype of(types...)
 }
 ```
 
-**Purpose:** Template describing component composition. Entities share archetypes in `ArchetypeChunk` for cache efficiency.
+### Creating Archetypes
 
-## ArchetypeChunk
+```java
+// Empty archetype
+Archetype<EntityStore> empty = Archetype.of();
+
+// Archetype with components
+Archetype<EntityStore> movable = Archetype.of(
+    TransformComponentType,
+    VelocityComponentType
+);
+
+// Extend existing
+Archetype<EntityStore> item = Archetype.add(movable, ItemComponentType);
+```
+
+## ArchetypeChunk - Memory Layout
+
+Entities are stored in chunks grouped by archetype. Uses **column-major layout** for cache efficiency during iteration.
 
 ```java
 public class ArchetypeChunk<ECS_TYPE> {
@@ -219,41 +485,234 @@ public class ArchetypeChunk<ECS_TYPE> {
     protected Ref<ECS_TYPE>[] refs;
     protected Component<ECS_TYPE>[][] components; // [typeIndex][entityIndex]
 
+    public int size()
     public <T> T getComponent(int index, ComponentType<T> type)
     public <T> void setComponent(int index, ComponentType<T> type, T component)
+    public Ref<ECS_TYPE> getRef(int index)
 }
 ```
 
-**Column-major layout:** `components[componentTypeIndex][entityIndex]` for cache-coherent iteration.
+### Memory Layout Visualization
+
+```
+ArchetypeChunk for [Transform, Velocity, Model]:
+
+components[0] (Transform):  [T0, T1, T2, T3, T4, ...]  ← contiguous
+components[1] (Velocity):   [V0, V1, V2, V3, V4, ...]  ← contiguous
+components[2] (Model):      [M0, M1, M2, M3, M4, ...]  ← contiguous
+refs:                       [R0, R1, R2, R3, R4, ...]
+```
+
+**Why column-major:** When iterating over all entities to update transforms, you access `T0, T1, T2...` sequentially - excellent CPU cache utilization.
+
+### Efficient Chunk Iteration
+
+```java
+for (ArchetypeChunk<EntityStore> chunk : store.getChunks(query)) {
+    int size = chunk.size();
+    for (int i = 0; i < size; i++) {
+        TransformComponent t = chunk.getComponent(i, TransformComponentType);
+        Velocity v = chunk.getComponent(i, VelocityComponentType);
+        // Process - cache-friendly access pattern
+    }
+}
+```
 
 ## Query System
 
-```java
-Query<EntityStore> query = Query.and(
-    TransformComponentType,
-    ItemComponentType,
-    Query.not(NonTickingComponentType)
-);
+Queries filter entities by component composition. Used for system iteration.
 
-List<ArchetypeChunk<EntityStore>> chunks = store.getChunks(query);
+```java
+public interface Query<ECS_TYPE> {
+    boolean test(Archetype<ECS_TYPE> archetype);
+    boolean requiresComponentType(ComponentType<ECS_TYPE, ?> type);
+    void validate();
+}
 ```
 
-**Query Types:**
-- `Query.any()` - Match all
-- `Query.not(query)` - Exclude
-- `Query.and(queries...)` - All must match
-- `Query.or(queries...)` - Any must match
+### Query Composition
+
+```java
+// Match all entities
+Query<EntityStore> all = Query.any();
+
+// Entities with specific component
+Query<EntityStore> hasTransform = TransformComponentType;  // ComponentType implements Query
+
+// Exclude component
+Query<EntityStore> notFrozen = Query.not(FrozenComponentType);
+
+// All must match (AND)
+Query<EntityStore> movable = Query.and(
+    TransformComponentType,
+    VelocityComponentType,
+    Query.not(FrozenComponentType)
+);
+
+// Any must match (OR)
+Query<EntityStore> damageable = Query.or(
+    PlayerComponentType,
+    NPCComponentType
+);
+```
+
+### Query Types
+
+| Query | Purpose |
+|-------|---------|
+| `Query.any()` | Match all archetypes |
+| `Query.not(query)` | Exclude matching |
+| `Query.and(queries...)` | All must match |
+| `Query.or(queries...)` | Any can match |
+| `ComponentType` | Match single component |
+| `Archetype` | Exact archetype match |
+
+### Using Queries
+
+```java
+// Get matching chunks
+List<ArchetypeChunk<EntityStore>> chunks = store.getChunks(query);
+
+// In a QuerySystem
+public class MySystem extends TickingSystem<EntityStore> implements QuerySystem<EntityStore> {
+    @Override
+    public Query<EntityStore> getQuery() {
+        return Query.and(TransformComponentType, VelocityComponentType);
+    }
+
+    @Override
+    public void tick(float deltaTime, int tick, Store<EntityStore> store) {
+        for (ArchetypeChunk<EntityStore> chunk : store.getChunks(getQuery())) {
+            // Process matching entities
+        }
+    }
+}
+```
+
+## SystemGroup and Dependencies
+
+Systems are organized into groups with explicit dependency ordering.
+
+### SystemGroup
+
+```java
+public class SystemGroup<ECS_TYPE> {
+    private final ComponentRegistry<ECS_TYPE> registry;
+    private final int index;
+    private final Set<Dependency<ECS_TYPE>> dependencies;
+
+    public Set<Dependency<ECS_TYPE>> getDependencies()
+    public int getIndex()
+    public void validate()
+}
+```
+
+### Dependency Ordering
+
+```java
+public abstract class Dependency<ECS_TYPE> {
+    protected final Order order;  // BEFORE or AFTER
+    protected final int priority;
+
+    public Order getOrder()
+    public int getPriority()
+}
+
+public enum Order {
+    BEFORE,  // This system runs before target
+    AFTER    // This system runs after target
+}
+```
+
+### Dependency Types
+
+| Dependency | Purpose |
+|------------|---------|
+| `SystemDependency` | Order relative to specific system |
+| `SystemTypeDependency` | Order relative to system type |
+| `SystemGroupDependency` | Order relative to system group |
+| `RootDependency` | Order relative to root (first/last) |
+
+### Declaring Dependencies
+
+```java
+public class PhysicsSystem extends TickingSystem<EntityStore> {
+    @Override
+    public Set<Dependency<EntityStore>> getDependencies() {
+        return Set.of(
+            new SystemTypeDependency<>(Order.AFTER, InputSystemType),
+            new SystemTypeDependency<>(Order.BEFORE, RenderSystemType)
+        );
+    }
+}
+```
 
 ## CommandBuffer (Deferred Modifications)
 
+CommandBuffer queues entity/component modifications to execute safely after iteration completes. Required when modifying entities during system processing.
+
+```java
+public class CommandBuffer<ECS_TYPE> implements ComponentAccessor<ECS_TYPE> {
+    // Read operations (immediate)
+    public <T> T getComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+    public <T extends Resource<ECS_TYPE>> T getResource(ResourceType<T> type)
+
+    // Write operations (deferred)
+    public Ref<ECS_TYPE> addEntity(Holder<ECS_TYPE> holder, AddReason reason)
+    public void removeEntity(Ref<ECS_TYPE> ref, RemoveReason reason)
+    public void tryRemoveEntity(Ref<ECS_TYPE> ref, RemoveReason reason)
+    public <T> void addComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+    public <T> void removeComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+    public <T> void putComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+
+    // Forking for parallel execution
+    public CommandBuffer<ECS_TYPE> fork()
+    public void mergeParallel(CommandBuffer<ECS_TYPE> other)
+
+    // Event invocation
+    public <Event extends EcsEvent> void invoke(Ref<ECS_TYPE> ref, Event event)
+    public <Event extends EcsEvent> void invoke(Event event)
+}
+```
+
+### Usage Pattern
+
 ```java
 CommandBuffer<EntityStore> buffer = store.takeCommandBuffer();
-buffer.addComponent(ref, TransformComponentType, newTransform);
-buffer.removeComponent(ref, ItemComponentType);
+
+// Queue modifications
+buffer.addComponent(ref, VelocityComponentType, new Velocity(1, 0, 0));
+buffer.removeComponent(otherRef, FrozenComponentType);
+
+// Execute all queued operations
 store.executeCommandBuffer(buffer);
 ```
 
-**Purpose:** Safe entity/component modifications during iteration.
+### In Systems
+
+```java
+public class DespawnSystem extends TickingSystem<EntityStore> {
+    @Override
+    public void tick(float deltaTime, int tick, Store<EntityStore> store) {
+        CommandBuffer<EntityStore> buffer = store.takeCommandBuffer();
+        TimeResource time = buffer.getResource(TimeResourceType);
+
+        for (ArchetypeChunk<EntityStore> chunk : store.getChunks(DespawnComponentType)) {
+            for (int i = 0; i < chunk.size(); i++) {
+                DespawnComponent despawn = chunk.getComponent(i, DespawnComponentType);
+                if (time.now().isAfter(despawn.getTimeToDespawnAt())) {
+                    // Safe - queued for later execution
+                    buffer.removeEntity(chunk.getRef(i), RemoveReason.REMOVE);
+                }
+            }
+        }
+
+        store.executeCommandBuffer(buffer);
+    }
+}
+```
+
+**Purpose:** Safe entity/component modifications during iteration. Never modify store directly while iterating.
 
 ## Component Registration
 

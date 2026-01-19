@@ -294,8 +294,90 @@ world.execute {
 3. **Tick** - Active if players nearby
 4. **Unload** - Saved to disk when no players nearby
 
+## ECS: Block Entities
+
+Some blocks have associated entity components (chests, signs, etc.). Access them via the chunk's entity store:
+
+```kotlin
+import com.hypixel.hytale.server.core.modules.entity.component.BlockEntity
+
+// Find block entities in a chunk
+fun findBlockEntities(world: World, chunkX: Int, chunkZ: Int) {
+    world.execute {
+        val store = world.entityStore.store
+        val query = Query.and(BlockEntityComponentType, TransformComponentType)
+
+        for (chunk in store.getChunks(query)) {
+            for (i in 0 until chunk.size()) {
+                val blockEntity = chunk.getComponent(i, BlockEntityComponentType)
+                val transform = chunk.getComponent(i, TransformComponentType)
+
+                // Check if in target chunk
+                val pos = transform.position
+                val cx = pos.x.toInt() shr 4
+                val cz = pos.z.toInt() shr 4
+
+                if (cx == chunkX && cz == chunkZ) {
+                    logger.info("Block entity at $pos: ${blockEntity.blockType}")
+                }
+            }
+        }
+    }
+}
+```
+
+### Modifying Block Entity Data
+
+```kotlin
+// Example: Update a sign's text
+fun updateSign(world: World, ref: Ref<EntityStore>, newText: String) {
+    world.execute {
+        val buffer = world.entityStore.store.takeCommandBuffer()
+
+        val signData = buffer.getComponent(ref, SignDataComponentType)
+        if (signData != null) {
+            signData.text = newText
+            buffer.putComponent(ref, SignDataComponentType, signData)
+        }
+
+        world.entityStore.store.executeCommandBuffer(buffer)
+    }
+}
+```
+
+### Creating Block Entities with Systems
+
+Use a `RefSystem` to react to block entity creation:
+
+```kotlin
+class BlockEntityTracker : RefSystem<EntityStore>() {
+    override fun getQuery() = BlockEntityComponentType
+
+    override fun onEntityAdded(
+        ref: Ref<EntityStore>,
+        reason: AddReason,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>
+    ) {
+        val blockEntity = buffer.getComponent(ref, BlockEntityComponentType)
+        logger.info("Block entity created: ${blockEntity?.blockType}")
+    }
+
+    override fun onEntityRemove(
+        ref: Ref<EntityStore>,
+        reason: RemoveReason,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>
+    ) {
+        logger.info("Block entity removed: $ref")
+    }
+}
+```
+
 ## Next Steps
 
 - [Scheduling Tasks](/scheduling-tasks) - Delayed world modifications
 - [Handling Events](/handling-events) - Block events
 - [Custom Components](/custom-components) - Block components
+- [ECS Components](/ecs-components) - Complete component reference
+- [Advanced ECS](/advanced-ecs) - Spatial queries and performance

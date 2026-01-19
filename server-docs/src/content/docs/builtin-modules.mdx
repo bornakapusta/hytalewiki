@@ -5,49 +5,97 @@ description: Pre-built gameplay systems
 
 ## Overview
 
-Hytale includes **44 built-in plugins** across **32 major gameplay systems** in `com.hypixel.hytale.builtin`.
+Hytale includes **48 built-in plugins** in `com.hypixel.hytale.builtin` and `com.hypixel.hytale.server`. These provide complete gameplay systems you can use, extend, or learn from.
 
-## Module List
+## Complete Plugin List
 
-| Module | Description |
-|--------|-------------|
-| `adventure/` | Core gameplay progression (15 sub-plugins) |
-| `ambience/` | Environmental effects |
-| `beds/` | Bed/respawn mechanics |
-| `blockphysics/` | Block stability simulation |
-| `blockspawner/` | Dynamic block spawning |
-| `blocktick/` | Block update system |
-| `buildertools/` | Prefab editor utilities |
-| `crafting/` | Crafting benches and recipes |
-| `creativehub/` | Creative mode utilities |
-| `crouchslide/` | Crouch-slide movement |
-| `deployables/` | Deployable structures |
-| `fluid/` | Water/lava simulation |
-| `instances/` | Instanced worlds |
-| `mantling/` | Ledge climbing |
-| `mounts/` | Mount/riding system |
-| `npccombatactionevaluator/` | NPC combat AI |
-| `parkour/` | Checkpoint system |
-| `portals/` | Portal mechanics |
-| `safetyroll/` | Fall damage reduction |
-| `teleport/` | Teleportation |
-| `weather/` | Weather system |
-| `worldgen/` | World generation |
+### Core Systems
 
-## Adventure Sub-Modules
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `NPC` | `NPCPlugin` | Core NPC framework with AI, combat, behaviors |
+| `Spawning` | `SpawningPlugin` | Entity spawn controllers (sub-plugin of NPC) |
+| `Flock` | `FlockPlugin` | Group AI behavior (sub-plugin of NPC) |
+| `HytaleGenerator` | `HytaleGenerator` | Procedural world generation |
+| `WorldGen` | `WorldGenPlugin` | World generation utilities |
+| `TagSet` | `TagSetPlugin` | Entity/item tag system |
+| `Model` | `ModelPlugin` | 3D model management |
 
-| Module | Purpose |
-|--------|---------|
-| `camera/` | First-person camera effects |
-| `farming/` | Crop growth, soil, coops |
-| `memories/` | Player history |
-| `npcobjecives/` | NPC-given objectives |
-| `npcreputation/` | NPC reputation |
-| `npcshop/` | NPC trading |
-| `objectives/` | Quest system |
-| `shop/` | Item shops |
-| `stash/` | Player storage |
-| `teleporter/` | Teleportation NPCs |
+### Block Systems
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `BlockTick` | `BlockTickPlugin` | Block update scheduling |
+| `BlockPhysics` | `BlockPhysicsPlugin` | Gravity/support simulation |
+| `BlockSpawner` | `BlockSpawnerPlugin` | Block-triggered spawning |
+| `Fluid` | `FluidPlugin` | Water/lava flow |
+
+### Movement Mechanics
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `Mantling` | `MantlingPlugin` | Ledge climbing |
+| `SafetyRoll` | `SafetyRollPlugin` | Fall damage reduction roll |
+| `SprintForce` | `SprintForcePlugin` | Sprint acceleration/deceleration |
+| `CrouchSlide` | `CrouchSlidePlugin` | Crouch-slide movement |
+| `Parkour` | `ParkourPlugin` | Timer and checkpoint system |
+
+### Tools & Editors
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `BuilderTools` | `BuilderToolsPlugin` | Prefab editor tools |
+| `AssetEditor` | `AssetEditorPlugin` | In-game asset editor |
+| `NPCEditor` | `NPCEditorPlugin` | NPC editing tools |
+| `CommandMacro` | `MacroCommandPlugin` | Command macro system |
+
+### Adventure Systems
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `Objectives` | `ObjectivePlugin` | Quest/objective system |
+| `NPCObjectives` | `NPCObjectivesPlugin` | NPC-given objectives |
+| `ObjectiveReputation` | `ObjectiveReputationPlugin` | Reputation from objectives |
+| `ObjectiveShop` | `ObjectiveShopPlugin` | Shop objectives |
+| `Reputation` | `ReputationPlugin` | Reputation tracking |
+| `NPCReputation` | `NPCReputationPlugin` | NPC reputation integration |
+| `Shop` | `ShopPlugin` | Item shop system |
+| `ShopReputation` | `ShopReputationPlugin` | Reputation-based shops |
+| `NPCShop` | `NPCShopPlugin` | NPC shop integration |
+| `Stash` | `StashPlugin` | Player storage |
+| `Memories` | `MemoriesPlugin` | Player memory storage |
+
+### World Features
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `Weather` | `WeatherPlugin` | Weather system |
+| `Ambience` | `AmbiencePlugin` | Environmental audio/effects |
+| `Farming` | `FarmingPlugin` | Crop/animal farming |
+| `Portals` | `PortalsPlugin` | Portal mechanics |
+| `Teleport` | `TeleportPlugin` | Teleportation core |
+| `Teleporter` | `TeleporterPlugin` | Teleporter blocks |
+| `Beds` | `BedsPlugin` | Bed/sleep mechanics |
+
+### Gameplay
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `Crafting` | `CraftingPlugin` | Crafting benches/recipes |
+| `Mounts` | `MountPlugin` | Mount/riding system |
+| `NPCCombatActionEvaluator` | `NPCCombatActionEvaluatorPlugin` | NPC combat AI |
+| `Deployables` | `DeployablesPlugin` | Deployable items |
+| `Camera` | `CameraPlugin` | Camera effects |
+
+### Infrastructure
+
+| Plugin | Main Class | Description |
+|--------|------------|-------------|
+| `Instances` | `InstancesPlugin` | Instanced worlds |
+| `CreativeHub` | `CreativeHubPlugin` | Creative mode hub |
+| `LANDiscovery` | `LANDiscoveryPlugin` | LAN server discovery |
+| `Path` | `PathPlugin` | Pathfinding system |
+| `WorldLocationCondition` | `WorldLocationConditionPlugin` | Location-based conditions |
 
 ## Plugin Architecture
 
@@ -225,3 +273,157 @@ HytaleAssetStore.builder(AssetClass::class.java, DefaultAssetMap())
     .setKeyFunction { it.id }
     .build()
 ```
+
+## HytaleGenerator (World Generation)
+
+The procedural world generation system used for Hytale's terrain.
+
+**Location:** `com.hypixel.hytale.builtin.hytalegenerator.plugin`
+
+**Features:**
+- Multi-biome terrain generation
+- Cave and structure placement
+- Noise-based height maps
+- Feature decorators (trees, ores, etc.)
+
+**Key Classes:**
+- `HytaleGenerator` - Main plugin entry
+- `GeneratorContext` - Generation context data
+- `BiomeProvider` - Biome selection
+- `NoiseProvider` - Noise generation
+
+## NPC System
+
+The core NPC framework with AI, behaviors, and combat.
+
+**Location:** `com.hypixel.hytale.server.npc`
+
+**Components:**
+- `Blackboard` - AI state storage
+- `StateEvaluator` - Decision making
+- `NPCEntityEventSupport` - Event handling
+- `BeaconSupport` - Beacon awareness
+- `Timers` - Timer management
+
+**Sub-Plugins:**
+
+### Spawning System
+
+**Location:** `com.hypixel.hytale.server.spawning`
+
+Controls when and where entities spawn.
+
+**Components:**
+- `SpawnMarkerEntity` - Spawn point marker
+- `LocalSpawnBeacon` - Area spawn beacon
+- `LocalSpawnController` - Spawn controller
+- `SpawnSuppressionComponent` - Prevent spawning
+
+**Resources:**
+- `LocalSpawnState` - Current spawn state
+- `WorldSpawnData` - World-level spawn data
+
+### Flock System
+
+**Location:** `com.hypixel.hytale.server.flock`
+
+Group AI behavior for NPCs that move together.
+
+**Components:**
+- `Flock` - Flock membership data
+- `FlockMembership` - Individual member data
+- `PersistentFlockData` - Saved flock state
+
+**Usage:**
+```kotlin
+// Check if NPC is in a flock
+val flock = store.getComponent(ref, FlockComponentType)
+if (flock != null) {
+    val flockId = flock.flockId
+    val leaderRef = flock.leader
+}
+```
+
+## Path System
+
+Pathfinding for NPC navigation.
+
+**Location:** `com.hypixel.hytale.builtin.path`
+
+**Components:**
+- `WorldPathBuilder` - Path construction
+- `WorldPathData` (Resource) - Path network data
+
+**Events:**
+- `WorldPathChangedEvent` - Path network updated
+
+## CommandMacro System
+
+Execute multiple commands from a single trigger.
+
+**Location:** `com.hypixel.hytale.builtin.commandmacro`
+
+**Usage:**
+```kotlin
+// Define a macro that runs multiple commands
+// Macros can be triggered by player actions or other events
+```
+
+## TagSet System
+
+Tag entities and items for filtering and grouping.
+
+**Location:** `com.hypixel.hytale.builtin.tagset`
+
+**Usage:**
+```kotlin
+// Tags allow filtering entities by categories
+// e.g., "hostile", "friendly", "resource"
+```
+
+## Instances System
+
+Create isolated world instances for dungeons, minigames, etc.
+
+**Location:** `com.hypixel.hytale.builtin.instances`
+
+**Components:**
+- `InstanceEntityConfig` - Per-entity instance config
+- `InstanceDataResource` - Instance state
+
+**Features:**
+- Template-based instance creation
+- Automatic cleanup on completion
+- Player group isolation
+
+## Plugin Dependencies
+
+Plugins declare dependencies in `manifests.json`:
+
+```json
+{
+  "Group": "Hytale",
+  "Name": "MyPlugin",
+  "Version": "1.0.0",
+  "Main": "com.example.MyPlugin",
+  "Dependencies": {
+    "Hytale:NPC": "*",
+    "Hytale:EntityModule": "*"
+  },
+  "OptionalDependencies": {
+    "Hytale:Objectives": "*"
+  },
+  "SubPlugins": [
+    {
+      "Name": "SubFeature",
+      "Main": "com.example.SubFeaturePlugin"
+    }
+  ]
+}
+```
+
+## See Also
+
+- [Your First Plugin](/your-first-plugin) - Creating plugins
+- [ECS Components](/ecs-components) - Component system
+- [Advanced ECS](/advanced-ecs) - Advanced patterns

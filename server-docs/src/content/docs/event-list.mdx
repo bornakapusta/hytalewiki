@@ -3,24 +3,53 @@ title: Event List
 description: All available events in the Hytale Server API
 ---
 
-Complete list of events you can listen to in your plugins.
+Complete list of events you can listen to in your plugins. Events are organized by category.
 
 ## Player Events
 
 `com.hypixel.hytale.server.core.event.events.player.*`
 
+### Connection Events
+
 | Event | Description | Cancellable |
 |-------|-------------|-------------|
-| `PlayerConnectEvent` | Player connecting to server | No |
-| `PlayerDisconnectEvent` | Player disconnecting | No |
+| `PlayerSetupConnectEvent` | Initial connection setup, before auth | Yes |
+| `PlayerConnectEvent` | Player connecting, after auth | No |
 | `PlayerReadyEvent` | Player fully loaded and ready | No |
+| `PlayerDisconnectEvent` | Player disconnecting | No |
+| `PlayerSetupDisconnectEvent` | Disconnect cleanup | No |
+| `AddPlayerToWorldEvent` | Player added to a world | No |
+| `DrainPlayerFromWorldEvent` | Player removed from a world | No |
+
+### Input Events
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
 | `PlayerChatEvent` | Player sent a chat message | Yes |
 | `PlayerInteractEvent` | Player interaction with entity/block | Yes |
 | `PlayerCraftEvent` | Player crafting an item | Yes |
-| `AddPlayerToWorldEvent` | Player added to a world | No |
-| `DrainPlayerFromWorldEvent` | Player removed from a world | No |
 | `PlayerMouseButtonEvent` | Player pressed mouse button | No |
+| `PlayerMouseMotionEvent` | Player moved mouse | No |
 | `PlayerKeyEvent` | Player pressed keyboard key | No |
+
+### PlayerSetupConnectEvent
+
+Called before authentication. Use for connection filtering, server referrals.
+
+```kotlin
+eventRegistry.register(PlayerSetupConnectEvent::class.java) { event ->
+    val username = event.username      // Player username
+    val uuid = event.uuid              // Player UUID
+    val auth = event.auth              // Authentication info
+
+    // Redirect to another server
+    event.referToServer("lobby.example.com", 25565)
+
+    // Or deny connection
+    event.reason = "Server is full"
+    event.cancelled = true
+}
+```
 
 ### PlayerConnectEvent
 
@@ -117,6 +146,7 @@ eventRegistry.register(BreakBlockEvent::class.java) { event ->
 | `BootEvent` | Server fully booted | No |
 | `ShutdownEvent` | Server shutting down | No |
 | `PrepareUniverseEvent` | Universe being prepared | No |
+| `AllWorldsLoadedEvent` | All worlds finished loading | No |
 
 ### BootEvent
 
@@ -126,6 +156,136 @@ eventRegistry.register(BootEvent::class.java) { event ->
     logger.atInfo().log("Server boot complete!")
 }
 ```
+
+## Asset Events
+
+`com.hypixel.hytale.server.core.asset.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `LoadAssetEvent` | Assets being loaded | No |
+| `GenerateSchemaEvent` | Schema generation | No |
+| `AssetPackRegisterEvent` | Asset pack registered | No |
+| `AssetPackUnregisterEvent` | Asset pack unregistered | No |
+| `AssetStoreEvent` | Asset store changes | No |
+| `AssetMonitorEvent` | Asset file changes (hot reload) | No |
+| `AssetsEvent` | General assets event | No |
+
+### LoadAssetEvent
+
+Use for registering custom assets or validation during load.
+
+```kotlin
+eventRegistry.register(LoadAssetEvent::class.java) { event ->
+    val bootStart = event.bootStart    // Boot timestamp
+
+    // Mark load failure
+    if (!validateAssets()) {
+        event.failed(true, "Custom assets invalid")  // true = should shutdown
+    }
+}
+```
+
+### LoadAssetEvent Priorities
+
+```kotlin
+// Load order constants
+LoadAssetEvent.PRIORITY_LOAD_COMMON   // -32: Load common assets first
+LoadAssetEvent.PRIORITY_LOAD_REGISTRY // -16: Registry population
+LoadAssetEvent.PRIORITY_LOAD_LATE     //  64: Late loading
+
+// Register with priority
+eventRegistry.register(LoadAssetEvent.PRIORITY_LOAD_LATE, LoadAssetEvent::class.java) { event ->
+    // Runs after most asset loading
+}
+```
+
+## Plugin Events
+
+`com.hypixel.hytale.server.core.plugin.event.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `PluginEnableEvent` | Plugin being enabled | No |
+| `PluginDisableEvent` | Plugin being disabled | No |
+| `PluginEvent` | Base plugin event | No |
+
+```kotlin
+eventRegistry.register(PluginEnableEvent::class.java) { event ->
+    val plugin = event.plugin    // The plugin being enabled
+    logger.info("Plugin enabled: ${plugin.name}")
+}
+```
+
+## Permission Events
+
+`com.hypixel.hytale.server.core.event.events.permissions.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `PlayerPermissionChangeEvent` | Player permission changed | No |
+| `GroupPermissionChangeEvent` | Group permission changed | No |
+| `PlayerGroupEvent` | Player added/removed from group | No |
+
+```kotlin
+eventRegistry.register(PlayerPermissionChangeEvent::class.java) { event ->
+    val playerRef = event.playerRef
+    val permission = event.permission
+    val granted = event.granted
+
+    logger.info("Permission $permission ${if (granted) "granted to" else "revoked from"} player")
+}
+```
+
+## NPC/Spawning Events
+
+`com.hypixel.hytale.server.npc.*` and `com.hypixel.hytale.server.spawning.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `AllNPCsLoadedEvent` | All NPCs finished loading | No |
+| `LoadedNPCEvent` | Individual NPC loaded | No |
+
+## Localization Events
+
+`com.hypixel.hytale.server.core.modules.i18n.event.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `GenerateDefaultLanguageEvent` | Default language being generated | No |
+| `MessagesUpdated` | Language messages updated | No |
+
+## World Path Events
+
+`com.hypixel.hytale.server.core.universe.world.path.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `WorldPathChangedEvent` | World pathfinding data changed | No |
+
+## Adventure Events
+
+`com.hypixel.hytale.builtin.adventure.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `TreasureChestOpeningEvent` | Treasure chest being opened | Yes |
+
+## Singleplayer Events
+
+`com.hypixel.hytale.server.core.modules.singleplayer.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `SingleplayerRequestAccessEvent` | Singleplayer access requested | No |
+
+## Editor Events
+
+`com.hypixel.hytale.builtin.asseteditor.event.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `EditorClientEvent` | Editor client action | No |
 
 ## Game Mode Events
 

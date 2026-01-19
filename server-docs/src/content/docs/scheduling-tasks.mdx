@@ -357,8 +357,111 @@ HytaleServer.SCHEDULED_EXECUTOR.schedule({
 }, 5, TimeUnit.SECONDS)
 ```
 
+## ECS: TickingSystem Alternative
+
+For per-world or per-entity timed logic, use ECS `TickingSystem` instead of scheduled executors. Systems run on the world thread every tick (usually 20 ticks/second).
+
+### Basic TickingSystem
+
+```kotlin
+class CooldownSystem : TickingSystem<EntityStore>() {
+    override fun tick(deltaTime: Float, tick: Int, store: Store<EntityStore>) {
+        val buffer = store.takeCommandBuffer()
+
+        for (chunk in store.getChunks(CooldownComponentType)) {
+            for (i in 0 until chunk.size()) {
+                val cooldown = chunk.getComponent(i, CooldownComponentType)
+
+                cooldown.remaining -= deltaTime
+                if (cooldown.remaining <= 0) {
+                    // Cooldown expired - remove component
+                    buffer.removeComponent(chunk.getRef(i), CooldownComponentType)
+                }
+            }
+        }
+
+        store.executeCommandBuffer(buffer)
+    }
+}
+```
+
+### EntityTickingSystem
+
+Automatically iterates entities matching a query:
+
+```kotlin
+class DespawnTimerSystem : EntityTickingSystem<EntityStore>() {
+    override fun getQuery() = DespawnComponentType
+
+    override fun tick(
+        deltaTime: Float,
+        tick: Int,
+        index: Int,
+        chunk: ArchetypeChunk<EntityStore>,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>
+    ) {
+        val despawn = chunk.getComponent(index, DespawnComponentType)
+
+        despawn.timeRemaining -= deltaTime
+        if (despawn.timeRemaining <= 0) {
+            buffer.removeEntity(chunk.getRef(index), RemoveReason.REMOVE)
+        }
+    }
+}
+```
+
+### Registering Systems
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    override fun setup() {
+        // Register with entity store
+        getEntityStoreRegistry().registerSystem(CooldownSystem())
+        getEntityStoreRegistry().registerSystem(DespawnTimerSystem())
+    }
+}
+```
+
+### When to Use Which
+
+| Use Case | Solution |
+|----------|----------|
+| Server-wide timers (broadcasts, saves) | `SCHEDULED_EXECUTOR` |
+| Per-world game logic | `TickingSystem` |
+| Per-entity updates (cooldowns, AI) | `EntityTickingSystem` |
+| One-time delayed action | `SCHEDULED_EXECUTOR.schedule()` |
+| Component change reactions | `RefChangeSystem` |
+
+### Hybrid Approach
+
+Combine both for complex scenarios:
+
+```kotlin
+class GameManager(private val plugin: JavaPlugin) {
+    // Server-wide match timer (runs regardless of world state)
+    private var matchTimer: ScheduledFuture<*>? = null
+
+    // ECS system for per-entity game logic
+    private val gameSystem = GameTickSystem()
+
+    fun start() {
+        // Register ECS system for world-thread processing
+        plugin.getEntityStoreRegistry().registerSystem(gameSystem)
+
+        // Start server-wide timer
+        matchTimer = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            // This runs on executor thread - use for broadcasts, checks
+            checkMatchEnd()
+        }, 0, 1, TimeUnit.SECONDS)
+    }
+}
+```
+
 ## Next Steps
 
 - [Custom Components](/custom-components) - Timed component updates
 - [Handling Events](/handling-events) - Scheduled event responses
 - [Working with Players](/working-with-players) - Delayed player actions
+- [System Types](/system-types) - Complete system type reference
+- [Advanced ECS](/advanced-ecs) - Advanced system patterns

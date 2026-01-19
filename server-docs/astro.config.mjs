@@ -66,13 +66,15 @@ export default defineConfig({
 					items: [
 						{ label: 'API Quick Reference', slug: 'api-reference' },
 						{ label: 'Event List', slug: 'event-list' },
-						{ label: 'Component List', slug: 'ecs-components' },
+						{ label: 'ECS Components', slug: 'ecs-components' },
+						{ label: 'System Types', slug: 'system-types' },
 						{ label: 'Network Protocol', slug: 'protocol-api' },
 					],
 				},
 				{
 					label: 'Advanced',
 					items: [
+						{ label: 'Advanced ECS Patterns', slug: 'advanced-ecs' },
 						{ label: 'Built-in Modules', slug: 'builtin-modules' },
 						{ label: 'Asset System', slug: 'asset-system' },
 					],

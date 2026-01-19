@@ -9,10 +9,10 @@ description: Create entities, add components, and spawn them in the world
 
 ## Step 1: Understand the ECS Pattern
 
-Entities are composed of components:
+Entities are composed of components in a data-oriented architecture:
 
 ```
-Entity
+Entity (just a Ref identifier)
 ├── TransformComponent (position, rotation)
 ├── ModelComponent (3D model)
 ├── UUIDComponent (unique ID)
@@ -20,10 +20,26 @@ Entity
 └── ... other components
 ```
 
-Access pattern:
-- **Holder** - Staging container for components
-- **Ref** - Reference to entity in store
-- **Store** - Main entity storage
+### The Holder/Ref/Store Pattern
+
+| Type | Purpose | Lifecycle |
+|------|---------|-----------|
+| **Holder** | Staging container for components | Temporary - used during creation |
+| **Ref** | Stable reference to entity | Persistent - survives reorganization |
+| **Store** | Main entity storage | World-level singleton |
+
+```java
+// 1. Create holder (staging area)
+Holder<EntityStore> holder = registry.newHolder();
+holder.addComponent(TransformComponentType, transform);
+holder.addComponent(ModelComponentType, model);
+
+// 2. Add to store, get ref
+Ref<EntityStore> ref = store.addEntity(holder, AddReason.SPAWN);
+
+// 3. Use ref for future access
+TransformComponent t = store.getComponent(ref, TransformComponentType);
+```
 
 ## Step 2: Get a Reference to the World
 
@@ -234,10 +250,183 @@ class SpawnMobCommand : AbstractPlayerCommand("spawnmob", "Spawn a mob") {
 
 ## Entity Lifecycle
 
-1. **Create** - Build holder with components
-2. **Add** - Insert into store via `addEntity()`
-3. **Tick** - Processed each world tick
-4. **Remove** - Via `entity.remove()` or `store.removeEntity()`
+### Lifecycle States
+
+```
+1. STAGING     → Holder being composed
+2. ADDING      → addEntity() called with AddReason
+3. ACTIVE      → Entity in store, systems processing
+4. REMOVING    → removeEntity() called with RemoveReason
+5. REMOVED     → Ref invalidated, entity gone
+```
+
+### AddReason and RemoveReason
+
+```java
+public enum AddReason {
+    SPAWN,  // New entity created
+    LOAD    // Entity loaded from persistence
+}
+
+public enum RemoveReason {
+    REMOVE,  // Entity destroyed/despawned
+    UNLOAD   // Entity unloaded for persistence
+}
+```
+
+### Listening to Lifecycle Events
+
+Use `RefSystem` to hook into entity lifecycle:
+
+```kotlin
+class EntityLifecycleTracker : RefSystem<EntityStore>() {
+    override fun getQuery(): Query<EntityStore> = Query.any()
+
+    override fun onEntityAdded(
+        ref: Ref<EntityStore>,
+        reason: AddReason,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>
+    ) {
+        when (reason) {
+            AddReason.SPAWN -> logger.info("Entity spawned: $ref")
+            AddReason.LOAD -> logger.info("Entity loaded: $ref")
+        }
+    }
+
+    override fun onEntityRemove(
+        ref: Ref<EntityStore>,
+        reason: RemoveReason,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>
+    ) {
+        when (reason) {
+            RemoveReason.REMOVE -> logger.info("Entity removed: $ref")
+            RemoveReason.UNLOAD -> logger.info("Entity unloaded: $ref")
+        }
+    }
+}
+```
+
+## Archetype Iteration Patterns
+
+### Query-Based Iteration
+
+```kotlin
+// Define query once
+val MOVABLE_QUERY = Query.and(
+    TransformComponentType,
+    VelocityComponentType,
+    Query.not(FrozenComponentType)
+)
+
+// Iterate matching entities
+fun processMovableEntities(store: Store<EntityStore>) {
+    for (chunk in store.getChunks(MOVABLE_QUERY)) {
+        for (i in 0 until chunk.size()) {
+            val transform = chunk.getComponent(i, TransformComponentType)
+            val velocity = chunk.getComponent(i, VelocityComponentType)
+
+            // Update position
+            transform.position.apply {
+                x += velocity.x
+                y += velocity.y
+                z += velocity.z
+            }
+        }
+    }
+}
+```
+
+### Safe Iteration with CommandBuffer
+
+Never modify entities directly during iteration:
+
+```kotlin
+fun despawnOldEntities(store: Store<EntityStore>, maxAge: Long) {
+    val buffer = store.takeCommandBuffer()
+    val now = System.currentTimeMillis()
+
+    for (chunk in store.getChunks(AgeComponentType)) {
+        for (i in 0 until chunk.size()) {
+            val age = chunk.getComponent(i, AgeComponentType)
+            if (now - age.createdAt > maxAge) {
+                // Safe - queued for later
+                buffer.removeEntity(chunk.getRef(i), RemoveReason.REMOVE)
+            }
+        }
+    }
+
+    // Execute after iteration complete
+    store.executeCommandBuffer(buffer)
+}
+```
+
+### Efficient Component Checks
+
+```kotlin
+// Check if entity has component
+fun hasComponent(store: Store<EntityStore>, ref: Ref<EntityStore>): Boolean {
+    return store.getComponent(ref, TransformComponentType) != null
+}
+
+// Get archetype for component composition check
+fun hasAllComponents(store: Store<EntityStore>, ref: Ref<EntityStore>): Boolean {
+    val archetype = store.getArchetype(ref)
+    return archetype.contains(TransformComponentType) &&
+           archetype.contains(VelocityComponentType)
+}
+```
+
+## Batch Entity Operations
+
+### Spawning Multiple Entities
+
+```kotlin
+fun spawnSwarm(world: World, center: Vector3d, count: Int) {
+    world.execute {
+        val registry = world.entityStore.registry
+        val buffer = world.entityStore.store.takeCommandBuffer()
+
+        repeat(count) { i ->
+            val holder = registry.newHolder()
+
+            // Add components
+            val transform = TransformComponent()
+            transform.position.set(
+                center.x + (i % 10) * 2,
+                center.y,
+                center.z + (i / 10) * 2
+            )
+            holder.addComponent(TransformComponentType, transform)
+            holder.addComponent(UUIDComponentType, UUIDComponent())
+            holder.addComponent(VelocityComponentType, Velocity())
+
+            // Queue spawn
+            buffer.addEntity(holder, AddReason.SPAWN)
+        }
+
+        // Execute all spawns
+        world.entityStore.store.executeCommandBuffer(buffer)
+    }
+}
+```
+
+### Removing Entities by Query
+
+```kotlin
+fun removeAllProjectiles(store: Store<EntityStore>) {
+    val buffer = store.takeCommandBuffer()
+
+    for (chunk in store.getChunks(ProjectileComponentType)) {
+        for (i in 0 until chunk.size()) {
+            buffer.removeEntity(chunk.getRef(i), RemoveReason.REMOVE)
+        }
+    }
+
+    store.executeCommandBuffer(buffer)
+}
+```
 
 ## Thread Safety
 
@@ -256,8 +445,31 @@ world.execute {
 }
 ```
 
+### Safe Cross-Thread Access
+
+```kotlin
+// From another thread, schedule work on world thread
+fun scheduleEntityRemoval(world: World, ref: Ref<EntityStore>) {
+    world.execute {
+        if (ref.isValid()) {  // Always check!
+            world.entityStore.store.removeEntity(ref, RemoveReason.REMOVE)
+        }
+    }
+}
+```
+
+## Performance Tips
+
+1. **Cache queries** - Don't create query objects in hot paths
+2. **Use CommandBuffer** - Never modify during iteration
+3. **Batch operations** - Group spawns/removes together
+4. **Check isValid()** - Refs can become invalid asynchronously
+5. **Minimize archetype changes** - Adding/removing components causes entity moves
+
 ## Next Steps
 
 - [Manipulating Blocks](/manipulating-blocks) - World block editing
 - [Custom Components](/custom-components) - Create your own components
-- [Component List](/ecs-components) - All available components
+- [ECS Components](/ecs-components) - All available components
+- [Advanced ECS](/advanced-ecs) - Advanced patterns and performance
+- [System Types](/system-types) - System implementation reference
