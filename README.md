@@ -5,8 +5,8 @@ Documentation site for the Hytale Server Plugin API, built with [Astro](https://
 ## Project Structure
 
 ```
-hytale-docs/
-├── docs/               # Documentation site (Astro + Starlight)
+hytalewiki/
+├── server-docs/        # Documentation site (Astro + Starlight)
 │   └── CLAUDE.md       # AI assistant instructions for docs
 └── decompiled-server/  # Decompiled server code for reference
     └── CLAUDE.md       # AI assistant instructions for server code
@@ -15,7 +15,7 @@ hytale-docs/
 ## Getting Started
 
 ```bash
-cd docs
+cd server-docs
 npm install
 npm run dev     # Start dev server at localhost:4321
 ```
@@ -23,7 +23,7 @@ npm run dev     # Start dev server at localhost:4321
 ## Building
 
 ```bash
-cd docs
+cd server-docs
 npm run build   # Build to ./dist/
 npm run preview # Preview production build
 ```
