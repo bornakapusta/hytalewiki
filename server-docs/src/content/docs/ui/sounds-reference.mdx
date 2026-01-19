@@ -1,0 +1,201 @@
+---
+title: Sounds.ui Reference
+description: Reference for UI sound effects and audio feedback definitions
+---
+
+`Sounds.ui` defines audio feedback for UI interactions. Import it to add sounds to buttons and other interactive elements.
+
+## Importing
+
+```ui
+$Sounds = "../Sounds.ui";
+// Access sounds:
+$Sounds.@ButtonsLight
+```
+
+## Button Sounds
+
+### @ButtonsMain
+Primary action button sounds (prominent feedback).
+
+```ui
+@ButtonsMain = (
+  Activate: (SoundPath: "Sounds/ButtonsMainActivate.ogg", Volume: 6),
+  MouseHover: (SoundPath: "Sounds/ButtonsMainHover.ogg", MinPitch: -0.1, MaxPitch: 0.1, Volume: 2)
+);
+```
+
+### @ButtonsLight
+Standard button sounds (subtle feedback).
+
+```ui
+@ButtonsLight = (
+  Activate: (SoundPath: "Sounds/ButtonsLightActivate.ogg", MinPitch: -0.4, MaxPitch: 0.4, Volume: 4),
+  MouseHover: (SoundPath: "Sounds/ButtonsLightHover.ogg", Volume: 6)
+);
+```
+
+### @ButtonsCancel
+Cancel/close button sounds.
+
+```ui
+@ButtonsCancel = (
+  Activate: (SoundPath: "Sounds/ButtonsCancelActivate.ogg", MinPitch: -0.4, MaxPitch: 0.4, Volume: 6),
+  MouseHover: (SoundPath: "Sounds/ButtonsLightHover.ogg", Volume: 6)
+);
+```
+
+### @ButtonsDestructive
+Destructive action sounds (referenced via Common.ui).
+
+## Usage with Buttons
+
+Override or extend default sounds:
+
+```ui
+$C.@TextButton {
+  @Sounds = $Sounds.@SaveSettings;  // Custom activate sound
+  @Text = "Save";
+}
+```
+
+Combine sound sets:
+
+```ui
+Style: (
+  ...$C.@DefaultTextButtonStyle,
+  Sounds: (
+    ...$Sounds.@ButtonsLight,
+    ...$Sounds.@RespawnActivate
+  )
+);
+```
+
+## Special Sounds
+
+### @SaveSettings
+Save/confirm action feedback.
+
+```ui
+@SaveSettings = (
+  Activate: (SoundPath: "Sounds/SaveActivate.ogg", Volume: 6),
+  MouseHover: (SoundPath: "Sounds/ButtonsLightHover.ogg", Volume: 6)
+);
+```
+
+### @RespawnActivate
+Respawn button feedback.
+
+```ui
+@RespawnActivate = (
+  Activate: (SoundPath: "Sounds/Respawn_Stereo.ogg", Volume: -6)
+);
+```
+
+### @EnterWorld
+World/server entry feedback.
+
+```ui
+@EnterWorld = (
+  Activate: (SoundPath: "Sounds/EnterWorldActivate.ogg", Volume: 6),
+  MouseHover: (SoundPath: "Sounds/ButtonsLightHover.ogg", Volume: 6),
+  Context: (SoundPath: "Sounds/ButtonsLightActivate.ogg", Volume: 6)
+);
+```
+
+### @ServerList
+Server list interaction sounds.
+
+### @TopBar
+Top navigation bar sounds.
+
+## Checkbox Sounds
+
+### @Tick / @Untick
+Checkbox toggle sounds.
+
+```ui
+@Tick = "Sounds/TickActivate.ogg";
+@Untick = "Sounds/UntickActivate.ogg";
+```
+
+Used in checkbox styles:
+
+```ui
+CheckBoxStyle(
+  Checked: (ChangedSound: (SoundPath: $Sounds.@Tick, Volume: 6)),
+  Unchecked: (ChangedSound: (SoundPath: $Sounds.@Untick, Volume: 6))
+)
+```
+
+## Dropdown Sounds
+
+### @DropdownBox
+Dropdown open/close and hover sounds.
+
+```ui
+@DropdownBox = DropdownBoxSounds(
+  Activate: (SoundPath: "Sounds/TickActivate.ogg", Volume: 6),
+  MouseHover: (SoundPath: "Sounds/ButtonsLightHover.ogg", Volume: 6),
+  Close: (SoundPath: "Sounds/ButtonsCancelActivate.ogg", Volume: 6)
+);
+```
+
+## Utility Sounds
+
+### @Lock / @Unlock
+Lock/unlock interaction feedback.
+
+```ui
+@Lock = (Activate: (SoundPath: "Sounds/LockActivate.ogg", Volume: 6));
+@Unlock = (Activate: (SoundPath: "Sounds/UnlockActivate.ogg", Volume: 6));
+```
+
+### @Shuffle
+Randomize/shuffle action sound.
+
+```ui
+@Shuffle = (
+  Activate: (SoundPath: "Sounds/ShuffleActivate.ogg", MinPitch: -0.4, MaxPitch: 0.4, Volume: 1)
+);
+```
+
+### @CosmeticsTiles
+Cosmetic item selection sounds.
+
+## Sound Properties
+
+| Property | Description |
+|----------|-------------|
+| `SoundPath` | Path to .ogg audio file |
+| `Volume` | Volume level (dB, can be negative) |
+| `MinPitch` | Minimum pitch variation |
+| `MaxPitch` | Maximum pitch variation |
+
+## Sound Events
+
+| Event | Description |
+|-------|-------------|
+| `Activate` | Triggered on click/press |
+| `MouseHover` | Triggered on mouse enter |
+| `Close` | Triggered on dropdown close |
+| `Context` | Triggered on context action |
+| `ChangedSound` | Triggered on value change |
+
+## Raw Sound Paths
+
+Direct sound file references (for custom usage):
+
+| Variable | Path |
+|----------|------|
+| `@ButtonsMainActivate` | "Sounds/ButtonsMainActivate.ogg" |
+| `@ButtonsMainHover` | "Sounds/ButtonsMainHover.ogg" |
+| `@ButtonsLightActivate` | "Sounds/ButtonsLightActivate.ogg" |
+| `@ButtonsLightHover` | "Sounds/ButtonsLightHover.ogg" |
+| `@ButtonsCancelActivate` | "Sounds/ButtonsCancelActivate.ogg" |
+| `@SaveActivate` | "Sounds/SaveActivate.ogg" |
+| `@Respawn` | "Sounds/Respawn_Stereo.ogg" |
+| `@EnterWorldActivate` | "Sounds/EnterWorldActivate.ogg" |
+| `@ShuffleActivate` | "Sounds/ShuffleActivate.ogg" |
+| `@TopBarActivate` | "Sounds/TopBarActivate.ogg" |
+| `@HButtonHover` | "Sounds/HButtonHover.ogg" |

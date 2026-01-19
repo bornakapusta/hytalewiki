@@ -1,0 +1,263 @@
+---
+title: Spawning Entities
+description: Create entities, add components, and spawn them in the world
+---
+
+**Goal:** Spawn custom entities with components at a location.
+
+**Prerequisites:** [Handling Events](/handling-events)
+
+## Step 1: Understand the ECS Pattern
+
+Entities are composed of components:
+
+```
+Entity
+├── TransformComponent (position, rotation)
+├── ModelComponent (3D model)
+├── UUIDComponent (unique ID)
+├── Velocity (movement)
+└── ... other components
+```
+
+Access pattern:
+- **Holder** - Staging container for components
+- **Ref** - Reference to entity in store
+- **Store** - Main entity storage
+
+## Step 2: Get a Reference to the World
+
+```kotlin
+import com.hypixel.hytale.server.core.universe.Universe
+import com.hypixel.hytale.server.core.universe.world.World
+
+// Get world by name
+val world: World? = Universe.get().worlds["default"]
+
+// Or from an event
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val world = event.world
+}
+```
+
+## Step 3: Create and Spawn an Entity
+
+```kotlin
+import com.hypixel.hytale.server.core.entity.Entity
+import org.joml.Vector3d
+
+fun spawnEntity(world: World, position: Vector3d) {
+    world.execute {
+        val entity = MyEntity()
+        world.entityStore.spawnEntity(entity, position)
+    }
+}
+```
+
+Always spawn on the world thread using `world.execute {}`.
+
+## Step 4: Spawn an Item Drop
+
+```kotlin
+import com.hypixel.hytale.server.core.inventory.ItemStack
+import com.hypixel.hytale.server.core.modules.entity.component.ItemComponent
+import org.joml.Vector3d
+
+fun dropItem(world: World, position: Vector3d, itemStack: ItemStack) {
+    world.execute {
+        val holder = ItemComponent.generateItemDrop(
+            world.entityStore.store,
+            itemStack,
+            position,
+            null  // velocity
+        )
+        world.entityStore.store.addEntity(holder, AddReason.SPAWN)
+    }
+}
+
+// Usage
+dropItem(world, Vector3d(0.0, 100.0, 0.0), ItemStack("Tool_Pickaxe_Iron", 1))
+```
+
+## Step 5: Access Entity Components
+
+Using Holder:
+
+```kotlin
+val holder = entity.toHolder()
+
+// Get component
+val transform = holder.getComponent(TransformComponent.getComponentType())
+val uuid = holder.getComponent(UUIDComponent.getComponentType())?.uuid
+
+// Modify position
+transform?.position?.assign(x, y, z)
+```
+
+Using Store and Ref:
+
+```kotlin
+val ref = entity.reference ?: return
+val store = world.entityStore.store
+
+// Get component
+val transform = store.getComponent(ref, TransformComponent.getComponentType())
+val position = transform?.position
+
+// Check if valid
+if (ref.isValid()) {
+    // Entity still exists
+}
+```
+
+## Step 6: Iterate World Entities
+
+```kotlin
+world.entityStore.forEach { ref, accessor ->
+    val entity = accessor.getComponent(ref, Entity.getComponentType())
+    val transform = accessor.getComponent(ref, TransformComponent.getComponentType())
+
+    // Process entity
+    logger.atInfo().log("Entity at ${transform?.position}")
+}
+```
+
+## Step 7: Remove an Entity
+
+```kotlin
+fun removeEntity(entity: Entity) {
+    entity.remove()
+}
+
+// Or via store
+fun removeEntityByRef(world: World, ref: Ref<EntityStore>) {
+    world.execute {
+        world.entityStore.store.removeEntity(ref, RemoveReason.DESPAWN)
+    }
+}
+```
+
+## Step 8: Spawn with Custom Components
+
+```kotlin
+fun spawnCustomEntity(world: World, position: Vector3d) {
+    world.execute {
+        // Create holder for staging components
+        val registry = world.entityStore.registry
+        val holder = registry.newHolder()
+
+        // Add transform
+        val transform = TransformComponent()
+        transform.position.assign(position.x, position.y, position.z)
+        holder.addComponent(TransformComponent.getComponentType(), transform)
+
+        // Add UUID
+        holder.addComponent(UUIDComponent.getComponentType(), UUIDComponent())
+
+        // Add to world
+        val ref = world.entityStore.store.addEntity(holder, AddReason.SPAWN)
+    }
+}
+```
+
+## Complete Example
+
+Spawn mobs at player location:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.arguments.types.ArgTypes
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.entity.Entity
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import com.hypixel.hytale.server.core.universe.world.World
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Ref
+import hytale.ecs.Store
+import org.joml.Vector3d
+
+class SpawnMobCommand : AbstractPlayerCommand("spawnmob", "Spawn a mob") {
+    private val modelArg = withRequiredArg("model", "Entity model", ArgTypes.MODEL_ASSET)
+    private val countArg = withDefaultArg("count", "Number to spawn", ArgTypes.INTEGER, 1, "1")
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val model = context.get(modelArg)
+        val count = context.get(countArg)
+
+        // Get player position
+        val playerTransform = store.getComponent(ref, TransformComponent.getComponentType())
+        val position = playerTransform?.position ?: return
+
+        // Spawn entities
+        world.execute {
+            repeat(count) { i ->
+                val spawnPos = Vector3d(
+                    position.x + (i * 2),  // Offset each spawn
+                    position.y,
+                    position.z
+                )
+                spawnEntityAtPosition(world, model, spawnPos)
+            }
+        }
+
+        context.sendMessage(Message.raw("Spawned $count entities"))
+    }
+
+    private fun spawnEntityAtPosition(world: World, model: Any, position: Vector3d) {
+        // Entity spawning logic depends on entity type
+        // This is a simplified example
+        world.entityStore.spawnEntity(/* entity */, position)
+    }
+}
+```
+
+## Common Components
+
+| Component | Purpose |
+|-----------|---------|
+| `TransformComponent` | Position, rotation |
+| `UUIDComponent` | Unique identifier |
+| `ModelComponent` | 3D model reference |
+| `Velocity` | Movement vector |
+| `ItemComponent` | Item drop data |
+| `DespawnComponent` | Auto-despawn timing |
+| `HeadRotation` | Look direction |
+
+## Entity Lifecycle
+
+1. **Create** - Build holder with components
+2. **Add** - Insert into store via `addEntity()`
+3. **Tick** - Processed each world tick
+4. **Remove** - Via `entity.remove()` or `store.removeEntity()`
+
+## Thread Safety
+
+Always modify entities on the world thread:
+
+```kotlin
+// Check thread
+if (world.isInThread()) {
+    // Safe to modify
+}
+
+// Execute on world thread
+world.execute {
+    // Safe here
+    entity.remove()
+}
+```
+
+## Next Steps
+
+- [Manipulating Blocks](/manipulating-blocks) - World block editing
+- [Custom Components](/custom-components) - Create your own components
+- [Component List](/ecs-components) - All available components

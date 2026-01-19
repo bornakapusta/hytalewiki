@@ -1,0 +1,314 @@
+---
+title: ECS Components
+description: Entity Component System deep dive
+---
+
+## Overview
+
+Hytale uses a sophisticated **Entity Component System (ECS)** with 90+ core classes supporting flexible entity composition, resource management, and system-based processing.
+
+## Core Architecture
+
+```
+Component<ECS_TYPE> (interface)
+├── All components implement this
+└── Methods: clone(), cloneSerializable()
+
+Resource<ECS_TYPE> (interface)
+├── Global/shared data
+└── Method: clone()
+```
+
+## Store/Ref/Holder Pattern
+
+### Ref - Entity Reference
+
+```java
+public class Ref<ECS_TYPE> {
+    private final Store<ECS_TYPE> store;
+    private volatile int index;
+
+    public Store<ECS_TYPE> getStore()
+    public int getIndex()
+    public boolean isValid()
+    public void invalidate()
+}
+```
+
+**Purpose:** Persistent reference that survives internal reorganization.
+
+### Holder - Component Container
+
+```java
+public class Holder<ECS_TYPE> {
+    private Archetype<ECS_TYPE> archetype;
+    private Component<ECS_TYPE>[] components;
+
+    public <T> void addComponent(ComponentType<T> type, T component)
+    public <T> T getComponent(ComponentType<T> type)
+    public <T> void removeComponent(ComponentType<T> type)
+    public Holder<ECS_TYPE> clone()
+}
+```
+
+**Purpose:** Staging area for entity composition before insertion.
+
+### Store - Entity Management
+
+```java
+public class Store<ECS_TYPE> implements ComponentAccessor<ECS_TYPE> {
+    private Ref<ECS_TYPE>[] refs;
+    private ArchetypeChunk<ECS_TYPE>[] archetypeChunks;
+    private Resource<ECS_TYPE>[] resources;
+
+    public <T> T getComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+    public <T> void putComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+    public Ref<ECS_TYPE> addEntity(Holder<ECS_TYPE> holder, AddReason reason)
+    public Holder<ECS_TYPE> removeEntity(Ref<ECS_TYPE> ref, RemoveReason reason)
+}
+```
+
+**Purpose:** Main entity store with archetype-based organization.
+
+## ComponentAccessor Interface
+
+```java
+public interface ComponentAccessor<ECS_TYPE> {
+    // Read
+    <T> T getComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+    <T> T ensureAndGetComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+
+    // Write
+    <T> void putComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+    <T> void addComponent(Ref<ECS_TYPE> ref, ComponentType<T> type, T component)
+
+    // Delete
+    <T> void removeComponent(Ref<ECS_TYPE> ref, ComponentType<T> type)
+
+    // Entity Management
+    Ref<ECS_TYPE> addEntity(Holder<ECS_TYPE> holder, AddReason reason)
+    Holder<ECS_TYPE> removeEntity(Ref<ECS_TYPE> ref, RemoveReason reason)
+
+    // Resources
+    <T extends Resource<ECS_TYPE>> T getResource(ResourceType<T> type)
+}
+```
+
+## Common Components
+
+### TransformComponent
+
+```java
+public class TransformComponent implements Component<EntityStore> {
+    private final Vector3d position;
+    private final Vector3f rotation;
+    private Ref<ChunkStore> chunkRef;
+
+    public Vector3d getPosition()
+    public void setPosition(Vector3d position)
+    public void teleportPosition(Vector3d position)
+    public Vector3f getRotation()
+    public Transform getTransform()
+}
+```
+
+### ItemComponent
+
+```java
+public class ItemComponent implements Component<EntityStore> {
+    private ItemStack itemStack;
+    private float mergeDelay = 1.5F;
+    private float pickupDelay = 0.5F;
+
+    public ItemStack getItemStack()
+    public float getPickupRadius(ComponentAccessor accessor)
+    public float computeLifetimeSeconds(ComponentAccessor accessor)
+
+    // Factory methods
+    public static Holder<EntityStore>[] generateItemDrops(...)
+    public static Holder<EntityStore> generateItemDrop(...)
+}
+```
+
+### DamageDataComponent
+
+```java
+public class DamageDataComponent implements Component<EntityStore> {
+    private Instant lastCombatAction;
+    private Instant lastDamageTime;
+    private WieldingInteraction currentWielding;
+    private Instant lastChargeTime;
+}
+```
+
+### DespawnComponent
+
+```java
+public class DespawnComponent implements Component<EntityStore> {
+    private Instant timeToDespawnAt;
+
+    public static DespawnComponent despawnInSeconds(TimeResource time, float seconds)
+    public static DespawnComponent despawnInMilliseconds(TimeResource time, long ms)
+}
+```
+
+### UUIDComponent
+
+```java
+public final class UUIDComponent implements Component<EntityStore> {
+    private UUID uuid;
+
+    // Auto-generates Version3 UUID if null on decode
+}
+```
+
+## Component Categories
+
+### Transform & Position
+- `TransformComponent` - Position + rotation
+- `PositionDataComponent` - Additional metadata
+- `HeadRotation` - Head direction
+
+### Visual/Rendering
+- `ModelComponent` - 3D model reference
+- `DisplayNameComponent` - Display name
+- `EntityScaleComponent` - Scale value
+- `ActiveAnimationComponent` - Animations
+
+### Physics & Movement
+- `Velocity` - Motion vector
+- `PhysicsValues` - Physics config
+- `CollisionResultComponent` - Collision results
+- `KnockbackComponent` - Knockback velocity
+
+### Combat & Damage
+- `DamageDataComponent` - Combat tracking
+- `DeathComponent` - Death state
+- `DamageEffect` - Damage display
+
+### Markers (Singletons)
+- `Interactable` - Can be interacted with
+- `Intangible` - No collision
+- `Invulnerable` - No damage
+- `NonTicking` - Skip tick processing
+- `NonSerialized` - Skip persistence
+
+## Archetype System
+
+```java
+public class Archetype<ECS_TYPE> implements Query<ECS_TYPE> {
+    private final ComponentType<ECS_TYPE, ?>[] componentTypes;
+
+    public boolean contains(ComponentType<ECS_TYPE, ?> type)
+    public boolean contains(Archetype<ECS_TYPE> other)
+
+    // Immutable operations
+    public static Archetype add(archetype, type)
+    public static Archetype remove(archetype, type)
+    public static Archetype of(types[])
+}
+```
+
+**Purpose:** Template describing component composition. Entities share archetypes in `ArchetypeChunk` for cache efficiency.
+
+## ArchetypeChunk
+
+```java
+public class ArchetypeChunk<ECS_TYPE> {
+    protected final Archetype<ECS_TYPE> archetype;
+    protected Ref<ECS_TYPE>[] refs;
+    protected Component<ECS_TYPE>[][] components; // [typeIndex][entityIndex]
+
+    public <T> T getComponent(int index, ComponentType<T> type)
+    public <T> void setComponent(int index, ComponentType<T> type, T component)
+}
+```
+
+**Column-major layout:** `components[componentTypeIndex][entityIndex]` for cache-coherent iteration.
+
+## Query System
+
+```java
+Query<EntityStore> query = Query.and(
+    TransformComponentType,
+    ItemComponentType,
+    Query.not(NonTickingComponentType)
+);
+
+List<ArchetypeChunk<EntityStore>> chunks = store.getChunks(query);
+```
+
+**Query Types:**
+- `Query.any()` - Match all
+- `Query.not(query)` - Exclude
+- `Query.and(queries...)` - All must match
+- `Query.or(queries...)` - Any must match
+
+## CommandBuffer (Deferred Modifications)
+
+```java
+CommandBuffer<EntityStore> buffer = store.takeCommandBuffer();
+buffer.addComponent(ref, TransformComponentType, newTransform);
+buffer.removeComponent(ref, ItemComponentType);
+store.executeCommandBuffer(buffer);
+```
+
+**Purpose:** Safe entity/component modifications during iteration.
+
+## Component Registration
+
+```java
+public class MySystem extends System<EntityStore> {
+    public static final ComponentType<EntityStore, MyComponent> MY_TYPE =
+        registerComponent(
+            MyComponent.class,
+            "MyComponent",
+            MyComponent.CODEC
+        );
+}
+```
+
+## Codec Pattern
+
+```java
+public class MyComponent implements Component<EntityStore> {
+    public static final BuilderCodec<MyComponent> CODEC =
+        BuilderCodec.builder(MyComponent.class, MyComponent::new)
+            .append(
+                new KeyedCodec<>("Field", Codec.FLOAT),
+                (o, v) -> o.field = v,
+                o -> o.field
+            )
+            .add()
+            .build();
+
+    @Override
+    public MyComponent clone() {
+        return new MyComponent(this.field);
+    }
+}
+```
+
+## Usage Example
+
+```java
+// 1. Create entity
+Holder<EntityStore> holder = registry.newHolder();
+holder.addComponent(TransformComponentType, new TransformComponent(...));
+holder.addComponent(ModelComponentType, new ModelComponent(...));
+
+// 2. Add to store
+Ref<EntityStore> ref = store.addEntity(holder, AddReason.SPAWN);
+
+// 3. Access components
+TransformComponent transform = store.getComponent(ref, TransformComponentType);
+transform.setPosition(new Vector3d(x, y, z));
+
+// 4. Iterate via system
+for (ArchetypeChunk<EntityStore> chunk : store.getChunksFor(archetype)) {
+    for (int i = 0; i < chunk.size(); i++) {
+        TransformComponent t = chunk.getComponent(i, TransformComponentType);
+        // Process...
+    }
+}
+```

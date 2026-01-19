@@ -1,0 +1,152 @@
+---
+title: Shop & Trading UI
+description: UI components for shops, trading, and barter systems
+---
+
+Components for shop interfaces, trading systems, and barter mechanics.
+
+## ShopPage.ui
+
+**Purpose**: Basic shop listing page with scrollable elements
+**Location**: `Pages/ShopPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ElementList` | Group | Scrollable list of shop items |
+
+```ui
+$C.@Container {
+  Anchor: (Width: 600, Height: 700);
+
+  #Title {
+    $C.@Title { @Text = %server.customUI.shopPage.title; }
+  }
+
+  #Content {
+    LayoutMode: Left;
+
+    Group #ElementList {
+      FlexWeight: 1;
+      LayoutMode: TopScrolling;
+      ScrollbarStyle: $C.@DefaultScrollbarStyle;
+    }
+  }
+}
+```
+
+## ShopElementButton.ui
+
+**Purpose**: Individual shop item button with icon, name, description, cost
+**Location**: `Pages/ShopElementButton.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | Button | Clickable item container |
+| `#Icon` | Group | Item icon (64x64) |
+| `#Name` | Label | Item name (bold) |
+| `#Description` | Label | Item description |
+| `#Cost` | Label | Price display |
+
+```ui
+Button #Button {
+  Padding: (Full: 6);
+  LayoutMode: Left;
+  Style: (Hovered: (Background: #000000(0.2)));
+
+  Group #Icon {
+    Anchor: (Width: 64, Height: 64);
+  }
+
+  Label #Name { Style: (RenderBold: true); FlexWeight: 1; }
+  Label #Description { FlexWeight: 1; }
+  Label #Cost { FlexWeight: 1; }
+}
+```
+
+## BarterPage.ui
+
+**Purpose**: Advanced barter/trading interface with grid layout and restock timer
+**Location**: `Pages/BarterPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ShopTitle` | Label | Shop name display |
+| `#TradeGridContainer` | Group | Scrollable trade cards container |
+| `#TradeGrid` | Group | Card grid with wrap layout |
+| `#Footer` | Group | Footer with timer |
+| `#FooterDivider` | Group | Visual divider |
+| `#RefreshTimer` | Label | Restock countdown |
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Width: 740, Height: 480);
+
+  #Content {
+    LayoutMode: Top;
+
+    Group #TradeGridContainer {
+      FlexWeight: 1;
+      LayoutMode: TopScrolling;
+      ScrollbarStyle: $C.@DefaultScrollbarStyle;
+
+      Group #TradeGrid {
+        LayoutMode: LeftCenterWrap;
+      }
+    }
+
+    Group #Footer {
+      Anchor: (Height: 40);
+
+      Label #RefreshTimer {
+        Style: (FontSize: 14, TextColor: #7caacc, HorizontalAlignment: Center);
+      }
+    }
+  }
+}
+```
+
+## BarterTradeRow.ui
+
+**Purpose**: Trade card showing output item, cost, and stock status
+**Location**: `Pages/BarterTradeRow.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#TradeButton` | ItemSlotButton | Main clickable trade card |
+| `#CardContent` | Group | Inner card layout |
+| `#OutputSection` | Group | What you receive |
+| `#OutputSlot` | ItemSlot | Output item display |
+| `#OutputQuantity` | Label | Output amount |
+| `#InputSection` | Group | Cost section |
+| `#InputSlot` | ItemSlot | Cost item display |
+| `#InputQuantity` | Label | Cost amount |
+| `#HaveNeedLabel` | Label | Player inventory status |
+| `#Stock` | Label | Available stock |
+| `#OutOfStockOverlay` | Group | Out-of-stock overlay |
+
+```ui
+ItemSlotButton #TradeButton {
+  Anchor: (Full: 0);
+  Style: (
+    Default: (Background: #252f3a),
+    Hovered: (Background: #c9a050),
+    Pressed: (Background: #a08040),
+    Disabled: (Background: #1a1e24)
+  );
+
+  Group #OutputSection {
+    Anchor: (Height: 80);
+
+    ItemSlot #OutputSlot {
+      ShowQualityBackground: true;
+    }
+  }
+}
+```
+
+## BarterGridSpacer.ui
+
+**Purpose**: Spacing element for barter grid alignment
+**Location**: `Pages/BarterGridSpacer.ui`
+
+Used as a flexible spacer within the trade grid to maintain proper alignment when the grid doesn't fill completely.

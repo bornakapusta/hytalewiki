@@ -1,0 +1,109 @@
+---
+title: Item Management UI
+description: UI components for item repair and management systems
+---
+
+Components for managing items including repair functionality.
+
+## ItemRepairPage.ui
+
+**Purpose**: Item repair interface with durability display
+**Location**: `Pages/ItemRepairPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ElementList` | Group | Scrollable list of repairable items |
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Width: 600, Height: 400);
+
+  #Title {
+    $C.@Title { @Text = %server.customUI.itemRepairPage.title; }
+  }
+
+  #Content {
+    Group {
+      LayoutMode: Left;
+      Padding: (Right: 15, Bottom: 5);
+
+      Label {
+        FlexWeight: 1;
+        Text: %server.customUI.itemRepairPage.item;
+        Style: (RenderBold: true);
+      }
+
+      Label {
+        Text: %server.customUI.itemRepairPage.durability;
+        Style: (RenderBold: true);
+      }
+    }
+
+    Group #ElementList {
+      FlexWeight: 1;
+      LayoutMode: TopScrolling;
+      ScrollbarStyle: $C.@DefaultScrollbarStyle;
+    }
+  }
+}
+```
+
+## ItemRepairElement.ui
+
+**Purpose**: Individual repairable item row
+**Location**: `Pages/ItemRepairElement.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | Button | Clickable repair item |
+| `#Icon` | ItemSlot | Item icon display |
+| `#Name` | Label | Item name |
+| `#DurabilityBar` | ProgressBar | Current durability visual |
+| `#DurabilityText` | Label | Durability percentage |
+| `#RepairCost` | Label | Repair cost display |
+
+Row element showing item details, current durability status, and repair cost. Clicking triggers the repair action.
+
+```ui
+Button #Button {
+  LayoutMode: Left;
+  Padding: (Full: 8);
+  Style: (Hovered: (Background: #000000(0.2)));
+
+  Group #IconContainer {
+    Anchor: (Width: 48, Height: 48);
+
+    ItemSlot #Icon {
+      Anchor: (Full: 0);
+    }
+  }
+
+  Group #InfoSection {
+    FlexWeight: 1;
+    LayoutMode: Top;
+    Padding: (Left: 12);
+
+    Label #Name {
+      Style: (FontSize: 16, RenderBold: true);
+    }
+
+    Group #DurabilitySection {
+      LayoutMode: Left;
+      Anchor: (Top: 4);
+
+      ProgressBar #DurabilityBar {
+        Anchor: (Width: 150, Height: 8);
+      }
+
+      Label #DurabilityText {
+        Anchor: (Left: 8);
+        Style: (FontSize: 12, TextColor: #96a9be);
+      }
+    }
+  }
+
+  Label #RepairCost {
+    Style: (TextColor: #c9a050, RenderBold: true);
+  }
+}
+```

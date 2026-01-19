@@ -1,0 +1,8 @@
+# generated types
+/server-docs/.astro/
+
+# dependencies
+/server-docs/node_modules/
+
+# macOS-specific files
+.DS_Store

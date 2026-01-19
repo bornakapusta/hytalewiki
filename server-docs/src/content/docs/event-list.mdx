@@ -1,0 +1,226 @@
+---
+title: Event List
+description: All available events in the Hytale Server API
+---
+
+Complete list of events you can listen to in your plugins.
+
+## Player Events
+
+`com.hypixel.hytale.server.core.event.events.player.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `PlayerConnectEvent` | Player connecting to server | No |
+| `PlayerDisconnectEvent` | Player disconnecting | No |
+| `PlayerReadyEvent` | Player fully loaded and ready | No |
+| `PlayerChatEvent` | Player sent a chat message | Yes |
+| `PlayerInteractEvent` | Player interaction with entity/block | Yes |
+| `PlayerCraftEvent` | Player crafting an item | Yes |
+| `AddPlayerToWorldEvent` | Player added to a world | No |
+| `DrainPlayerFromWorldEvent` | Player removed from a world | No |
+| `PlayerMouseButtonEvent` | Player pressed mouse button | No |
+| `PlayerKeyEvent` | Player pressed keyboard key | No |
+
+### PlayerConnectEvent
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef    // PlayerRef
+    val holder = event.holder          // Component holder
+    val world = event.world            // World (may be null)
+    event.world = someWorld            // Set spawn world
+}
+```
+
+### PlayerChatEvent
+
+```kotlin
+eventRegistry.register(PlayerChatEvent::class.java) { event ->
+    val message = event.message        // Chat message text
+    val holder = event.holder
+    event.cancel()                     // Prevent message from sending
+}
+```
+
+## Entity Events
+
+`com.hypixel.hytale.server.core.event.events.entity.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `EntityEvent` | Base entity event | No |
+| `EntityRemoveEvent` | Entity being removed from world | No |
+| `LivingEntityUseBlockEvent` | Living entity using a block | Yes |
+| `LivingEntityInventoryChangeEvent` | Entity inventory changed | No |
+
+## Block Events (ECS)
+
+`com.hypixel.hytale.server.core.event.events.ecs.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `PlaceBlockEvent` | Block placed by player | Yes |
+| `BreakBlockEvent` | Block broken by player | Yes |
+| `DamageBlockEvent` | Block damaged | Yes |
+| `UseBlockEvent` | Block used/interacted with | Yes |
+
+### PlaceBlockEvent
+
+```kotlin
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    val position = event.position      // Block position
+    val blockType = event.blockType    // Type being placed
+    val playerRef = event.playerRef    // Player placing
+    event.cancel()                     // Prevent placement
+}
+```
+
+### BreakBlockEvent
+
+```kotlin
+eventRegistry.register(BreakBlockEvent::class.java) { event ->
+    val position = event.position      // Block position
+    val playerRef = event.playerRef    // Player breaking
+    event.cancel()                     // Prevent breaking
+}
+```
+
+## Item Events (ECS)
+
+`com.hypixel.hytale.server.core.event.events.ecs.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `DropItemEvent` | Item dropped | Yes |
+| `InteractivelyPickupItemEvent` | Player picking up item | Yes |
+| `CraftRecipeEvent` | Recipe crafted | Yes |
+| `SwitchActiveSlotEvent` | Hotbar slot changed | No |
+
+## World Events
+
+`com.hypixel.hytale.server.core.event.events.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `StartWorldEvent` | World starting | No |
+| `WorldEvent` | Base world event | No |
+| `ChunkEvent` | Chunk-related events | No |
+| `DiscoverZoneEvent` | Zone discovered | No |
+
+## Server Events
+
+`com.hypixel.hytale.server.core.event.events.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `BootEvent` | Server fully booted | No |
+| `ShutdownEvent` | Server shutting down | No |
+| `PrepareUniverseEvent` | Universe being prepared | No |
+
+### BootEvent
+
+```kotlin
+eventRegistry.register(BootEvent::class.java) { event ->
+    // Server is fully started
+    logger.atInfo().log("Server boot complete!")
+}
+```
+
+## Game Mode Events
+
+`com.hypixel.hytale.server.core.event.events.ecs.*`
+
+| Event | Description | Cancellable |
+|-------|-------------|-------------|
+| `ChangeGameModeEvent` | Player game mode changed | Yes |
+
+## Event Priority
+
+Register with priority to control execution order:
+
+```kotlin
+// Run first
+eventRegistry.register(EventPriority.LOWEST, Event::class.java) { }
+
+// Run last, read-only
+eventRegistry.register(EventPriority.MONITOR, Event::class.java) { }
+```
+
+| Priority | Order | Purpose |
+|----------|-------|---------|
+| `LOWEST` | 1st | Initial processing |
+| `LOW` | 2nd | Early modifications |
+| `NORMAL` | 3rd | Default |
+| `HIGH` | 4th | Late modifications |
+| `HIGHEST` | 5th | Final modifications |
+| `MONITOR` | 6th | Logging/monitoring only |
+
+## Cancelling Events
+
+For events that implement `ICancellableEcsEvent`:
+
+```kotlin
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    if (shouldPrevent(event)) {
+        event.cancel()
+    }
+}
+```
+
+## Async Events
+
+For events implementing `IAsyncEvent`:
+
+```kotlin
+eventRegistry.registerAsync(SomeAsyncEvent::class.java) { future ->
+    future.thenApply { event ->
+        // Process asynchronously
+        event
+    }
+}
+```
+
+## Keyed Events
+
+Some events support filtering by key:
+
+```kotlin
+// Only listen for events in specific world
+eventRegistry.register(SomeKeyedEvent::class.java, "worldName") { event ->
+    // Only called for that world
+}
+
+// Listen to all keys
+eventRegistry.registerGlobal(SomeKeyedEvent::class.java) { event ->
+    // Called for all keys
+}
+```
+
+## Common Patterns
+
+### Safe Player Access
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    val holder = event.holder
+
+    val player = holder.getComponent(Player.getComponentType()) ?: return@register
+    // Use player safely
+}
+```
+
+### Delayed Event Response
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+
+    // Wait for player to fully load
+    HytaleServer.SCHEDULED_EXECUTOR.schedule({
+        val player = playerRef.holder?.getComponent(Player.getComponentType())
+        player?.sendMessage(Message.raw("Welcome!"))
+    }, 3, TimeUnit.SECONDS)
+}
+```

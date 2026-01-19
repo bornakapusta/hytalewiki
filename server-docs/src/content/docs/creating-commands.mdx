@@ -1,0 +1,286 @@
+---
+title: Creating Commands
+description: Build commands with arguments, subcommands, and permissions
+---
+
+**Goal:** Create a `/spawn` command with teleport and set subcommands.
+
+**Prerequisites:** [Your First Plugin](/your-first-plugin)
+
+## Step 1: Create a Basic Command
+
+Extend `CommandBase` for synchronous commands:
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.basecommands.CommandBase
+
+class PingCommand : CommandBase("ping", "server.commands.ping.description") {
+    override fun executeSync(context: CommandContext) {
+        context.sendMessage(Message.raw("Pong!"))
+    }
+}
+```
+
+Register in `setup()`:
+
+```kotlin
+override fun setup() {
+    commandRegistry.registerCommand(PingCommand())
+}
+```
+
+## Step 2: Add Arguments
+
+Use argument types for typed parsing:
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.arguments.types.ArgTypes
+
+class GiveCommand : CommandBase("give", "server.commands.give.description") {
+    private val playerArg = withRequiredArg("player", "target player", ArgTypes.PLAYER_REF)
+    private val itemArg = withRequiredArg("item", "item ID", ArgTypes.STRING)
+    private val amountArg = withDefaultArg("amount", "quantity", ArgTypes.INTEGER, 1, "1")
+
+    override fun executeSync(context: CommandContext) {
+        val player = context.get(playerArg)
+        val itemId = context.get(itemArg)
+        val amount = context.get(amountArg)
+
+        // Give item logic here
+        context.sendMessage(Message.raw("Gave $amount x $itemId to ${player.username}"))
+    }
+}
+```
+
+**Argument types:**
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `RequiredArg` | Must be provided | `/give <player>` |
+| `OptionalArg` | Optional `--name=value` | `--radius=10` |
+| `DefaultArg` | Optional with default | `--count=5` or uses default |
+| `FlagArg` | Boolean flag | `--force` |
+
+## Step 3: Check Sender Type
+
+For player-only commands, use `AbstractPlayerCommand`:
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.entity.Store
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import com.hypixel.hytale.server.core.universe.world.World
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+
+class MeCommand : AbstractPlayerCommand("me", "server.commands.me.description") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        // Guaranteed to be called by player in world
+        context.sendMessage(Message.raw("You are ${playerRef.username} in ${world.name}"))
+    }
+}
+```
+
+## Step 4: Create Subcommands
+
+Use `AbstractCommandCollection` for command groups:
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractCommandCollection
+
+class SpawnCommand : AbstractCommandCollection("spawn", "server.commands.spawn.description") {
+    init {
+        addSubCommand(SpawnTeleportCommand())
+        addSubCommand(SpawnSetCommand())
+    }
+}
+
+class SpawnTeleportCommand : AbstractPlayerCommand("tp", "Teleport to spawn") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        // Teleport player to spawn
+        val spawn = world.worldConfig.spawnPoint
+        val transform = store.getComponent(ref, TransformComponent.getComponentType())
+        transform?.teleportPosition(spawn)
+        context.sendMessage(Message.raw("Teleported to spawn"))
+    }
+}
+
+class SpawnSetCommand : AbstractPlayerCommand("set", "Set spawn point") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val transform = store.getComponent(ref, TransformComponent.getComponentType())
+        val position = transform?.position
+        // Set spawn point logic
+        context.sendMessage(Message.raw("Spawn set to $position"))
+    }
+}
+```
+
+Usage: `/spawn tp`, `/spawn set`
+
+## Step 5: Add Permissions
+
+Permissions are auto-generated hierarchically:
+
+```kotlin
+class AdminCommand : CommandBase("admin", "server.commands.admin.description") {
+    init {
+        // Require custom permission
+        requirePermission("myplugin.admin")
+    }
+
+    override fun executeSync(context: CommandContext) {
+        // Only admins can run this
+    }
+}
+```
+
+Check permissions manually:
+
+```kotlin
+override fun executeSync(context: CommandContext) {
+    if (!context.sender().hasPermission("myplugin.special")) {
+        context.sendMessage(Message.raw("No permission!"))
+        return
+    }
+    // Continue execution
+}
+```
+
+## Step 6: Add Aliases
+
+```kotlin
+class TeleportCommand : CommandBase("teleport", "server.commands.teleport.description") {
+    init {
+        addAliases("tp", "warp")
+    }
+
+    override fun executeSync(context: CommandContext) {
+        // Works with /teleport, /tp, or /warp
+    }
+}
+```
+
+## Complete Example
+
+A `/kit` command with subcommands:
+
+```kotlin
+package com.example.myplugin.commands
+
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.arguments.types.ArgTypes
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractCommandCollection
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.inventory.ItemStack
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import com.hypixel.hytale.server.core.universe.world.World
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Ref
+import hytale.ecs.Store
+
+class KitCommand : AbstractCommandCollection("kit", "server.commands.kit.description") {
+    init {
+        addSubCommand(KitStarterCommand())
+        addSubCommand(KitToolsCommand())
+        addSubCommand(KitListCommand())
+    }
+}
+
+class KitStarterCommand : AbstractPlayerCommand("starter", "Get starter kit") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+        val hotbar = player.inventory?.hotbar ?: return
+
+        hotbar.setItemStackForSlot(0.toShort(), ItemStack("Weapon_Sword_Iron", 1))
+        hotbar.setItemStackForSlot(1.toShort(), ItemStack("Tool_Pickaxe_Iron", 1))
+        hotbar.setItemStackForSlot(2.toShort(), ItemStack("Food_Apple", 16))
+
+        player.sendInventory()
+        context.sendMessage(Message.raw("Starter kit received!"))
+    }
+}
+
+class KitToolsCommand : AbstractPlayerCommand("tools", "Get tools kit") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+        val hotbar = player.inventory?.hotbar ?: return
+
+        hotbar.setItemStackForSlot(0.toShort(), ItemStack("Tool_Pickaxe_Iron", 1))
+        hotbar.setItemStackForSlot(1.toShort(), ItemStack("Tool_Axe_Iron", 1))
+        hotbar.setItemStackForSlot(2.toShort(), ItemStack("Tool_Shovel_Iron", 1))
+
+        player.sendInventory()
+        context.sendMessage(Message.raw("Tools kit received!"))
+    }
+}
+
+class KitListCommand : CommandBase("list", "List available kits") {
+    override fun executeSync(context: CommandContext) {
+        context.sendMessage(Message.raw("Available kits: starter, tools"))
+    }
+}
+```
+
+Register:
+
+```kotlin
+override fun setup() {
+    commandRegistry.registerCommand(KitCommand())
+}
+```
+
+## Built-in Argument Types
+
+| Type | Description |
+|------|-------------|
+| `ArgTypes.BOOLEAN` | true/false |
+| `ArgTypes.INTEGER` | Whole numbers |
+| `ArgTypes.FLOAT` | Decimal numbers |
+| `ArgTypes.DOUBLE` | Double precision |
+| `ArgTypes.STRING` | Text (quote spaces) |
+| `ArgTypes.UUID` | UUID format |
+| `ArgTypes.PLAYER_REF` | Online player |
+| `ArgTypes.WORLD` | World by name |
+| `ArgTypes.ITEM_ASSET` | Item type |
+| `ArgTypes.BLOCK_TYPE_ASSET` | Block type |
+| `ArgTypes.RELATIVE_POSITION` | 3D position (~ for relative) |
+| `ArgTypes.GAME_MODE` | CREATIVE, SURVIVAL, etc. |
+
+## Next Steps
+
+- [Working with Players](/working-with-players) - Player manipulation
+- [Spawning Entities](/spawning-entities) - Spawn mobs and items
+- [Scheduling Tasks](/scheduling-tasks) - Delayed commands

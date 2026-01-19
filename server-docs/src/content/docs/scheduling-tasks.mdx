@@ -1,0 +1,364 @@
+---
+title: Scheduling Tasks
+description: Delayed execution, repeating tasks, and game loops
+---
+
+**Goal:** Build a game manager with timed events and countdowns.
+
+**Prerequisites:** [Your First Plugin](/your-first-plugin)
+
+## Step 1: Schedule a Delayed Task
+
+Use `HytaleServer.SCHEDULED_EXECUTOR` for one-time delays:
+
+```kotlin
+import com.hypixel.hytale.server.core.HytaleServer
+import java.util.concurrent.TimeUnit
+
+// Execute once after 5 seconds
+HytaleServer.SCHEDULED_EXECUTOR.schedule({
+    logger.atInfo().log("This runs after 5 seconds")
+}, 5, TimeUnit.SECONDS)
+```
+
+## Step 2: Create a Repeating Task
+
+Fixed-rate (runs at consistent intervals):
+
+```kotlin
+val task = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+    // Runs every 10 seconds
+    tick()
+},
+    0,   // initial delay
+    10,  // period
+    TimeUnit.SECONDS
+)
+```
+
+Fixed-delay (waits after completion):
+
+```kotlin
+val task = HytaleServer.SCHEDULED_EXECUTOR.scheduleWithFixedDelay({
+    // Waits 5 seconds after this completes before running again
+    performCleanup()
+},
+    0,   // initial delay
+    5,   // delay between runs
+    TimeUnit.SECONDS
+)
+```
+
+**When to use which:**
+- **Fixed-rate**: Timing regularity matters (heartbeats, broadcasts)
+- **Fixed-delay**: Task must complete before next run (saving, sequential processing)
+
+## Step 3: Register with TaskRegistry
+
+Register tasks for automatic cleanup on plugin shutdown:
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    override fun start() {
+        val task = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            tick()
+        }, 0, 1, TimeUnit.SECONDS)
+
+        // Auto-cancelled on plugin shutdown
+        taskRegistry.registerTask(task)
+    }
+}
+```
+
+## Step 4: Cancel a Task
+
+```kotlin
+val task = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({ ... }, 0, 1, TimeUnit.SECONDS)
+
+// Cancel without interrupting if running
+task.cancel(false)
+
+// Cancel and interrupt if running
+task.cancel(true)
+
+// Check state
+val cancelled = task.isCancelled()
+```
+
+## Step 5: Build a Game Loop
+
+```kotlin
+class GameManager(private val plugin: JavaPlugin) {
+    private var tickTask: ScheduledFuture<*>? = null
+    private var tickCount = 0
+
+    fun start() {
+        tickTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            try {
+                tick()
+            } catch (e: Exception) {
+                plugin.logger.atSevere().withCause(e).log("Tick error")
+            }
+        }, 0, 1, TimeUnit.SECONDS)
+
+        plugin.taskRegistry.registerTask(tickTask!!)
+    }
+
+    private fun tick() {
+        tickCount++
+
+        // Run every 10 ticks
+        if (tickCount % 10 == 0) {
+            distributePassiveIncome()
+        }
+
+        // Run every minute
+        if (tickCount % 60 == 0) {
+            broadcastStats()
+        }
+    }
+
+    fun stop() {
+        tickTask?.cancel(false)
+    }
+}
+```
+
+## Step 6: Create a Countdown Timer
+
+```kotlin
+class CountdownTimer(
+    private val plugin: JavaPlugin,
+    private val durationSeconds: Int,
+    private val onTick: (remaining: Int) -> Unit,
+    private val onComplete: () -> Unit
+) {
+    private var remaining = durationSeconds
+    private var task: ScheduledFuture<*>? = null
+
+    fun start() {
+        task = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            if (remaining > 0) {
+                onTick(remaining)
+                remaining--
+            } else {
+                task?.cancel(false)
+                onComplete()
+            }
+        }, 0, 1, TimeUnit.SECONDS)
+
+        plugin.taskRegistry.registerTask(task!!)
+    }
+
+    fun cancel() {
+        task?.cancel(false)
+    }
+
+    fun reset() {
+        remaining = durationSeconds
+    }
+}
+
+// Usage
+val countdown = CountdownTimer(
+    plugin = this,
+    durationSeconds = 60,
+    onTick = { remaining ->
+        if (remaining <= 10 || remaining % 10 == 0) {
+            broadcastMessage("Game starts in $remaining seconds...")
+        }
+    },
+    onComplete = {
+        broadcastMessage("Game started!")
+        startGame()
+    }
+)
+countdown.start()
+```
+
+## Step 7: Delayed Player Actions
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+
+    // Player needs time to fully load before receiving messages
+    HytaleServer.SCHEDULED_EXECUTOR.schedule({
+        val player = playerRef.holder?.getComponent(Player.getComponentType())
+        player?.sendMessage(Message.raw("Welcome to the server!"))
+        giveStarterKit(playerRef)
+    }, 3, TimeUnit.SECONDS)
+}
+```
+
+## Step 8: Auto-Save System
+
+```kotlin
+class DataPersistence(private val plugin: JavaPlugin) {
+    private var saveTask: ScheduledFuture<*>? = null
+    private val dirty = AtomicBoolean(false)
+
+    fun startAutoSave() {
+        saveTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleWithFixedDelay({
+            try {
+                if (dirty.getAndSet(false)) {
+                    saveAllData()
+                    plugin.logger.atInfo().log("Auto-save complete")
+                }
+            } catch (e: Exception) {
+                dirty.set(true)  // Retry next cycle
+                plugin.logger.atSevere().withCause(e).log("Auto-save failed")
+            }
+        }, 5, 5, TimeUnit.MINUTES)
+
+        plugin.taskRegistry.registerTask(saveTask!!)
+    }
+
+    fun markDirty() {
+        dirty.set(true)
+    }
+
+    fun shutdown() {
+        saveTask?.cancel(false)
+        if (dirty.get()) {
+            saveAllData()  // Final save
+        }
+    }
+}
+```
+
+## Complete Example
+
+A match-based game plugin:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+class MatchPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    enum class GameState { WAITING, COUNTDOWN, PLAYING, ENDING }
+
+    private var state = GameState.WAITING
+    private var countdownTask: ScheduledFuture<*>? = null
+    private var gameTask: ScheduledFuture<*>? = null
+    private val gameTime = AtomicInteger(0)
+
+    override fun start() {
+        // Wait for players, then start countdown
+        logger.atInfo().log("MatchPlugin started, waiting for players")
+    }
+
+    fun startCountdown() {
+        if (state != GameState.WAITING) return
+        state = GameState.COUNTDOWN
+
+        var remaining = 10
+        countdownTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            if (remaining > 0) {
+                broadcast("Game starts in $remaining...")
+                remaining--
+            } else {
+                countdownTask?.cancel(false)
+                startGame()
+            }
+        }, 0, 1, TimeUnit.SECONDS)
+
+        taskRegistry.registerTask(countdownTask!!)
+    }
+
+    private fun startGame() {
+        state = GameState.PLAYING
+        gameTime.set(0)
+
+        broadcast("Game started!")
+
+        // Game tick every second
+        gameTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            val elapsed = gameTime.incrementAndGet()
+
+            // Game logic
+            if (elapsed % 30 == 0) {
+                broadcast("Time: ${elapsed / 60}:${elapsed % 60}")
+            }
+
+            // End after 5 minutes
+            if (elapsed >= 300) {
+                endGame()
+            }
+        }, 1, 1, TimeUnit.SECONDS)
+
+        taskRegistry.registerTask(gameTask!!)
+    }
+
+    private fun endGame() {
+        state = GameState.ENDING
+        gameTask?.cancel(false)
+
+        broadcast("Game over!")
+
+        // Reset after 10 seconds
+        HytaleServer.SCHEDULED_EXECUTOR.schedule({
+            state = GameState.WAITING
+            broadcast("Ready for next match!")
+        }, 10, TimeUnit.SECONDS)
+    }
+
+    private fun broadcast(message: String) {
+        // Send to all players
+        logger.atInfo().log(message)
+    }
+
+    override fun shutdown() {
+        countdownTask?.cancel(false)
+        gameTask?.cancel(false)
+    }
+}
+```
+
+## Thread Safety
+
+The `SCHEDULED_EXECUTOR` is single-threaded:
+- Tasks run sequentially (no parallel execution)
+- No synchronization needed between scheduled tasks
+- Long-running tasks block other scheduled tasks
+
+For thread-safe shared state:
+
+```kotlin
+// Safe: Atomic operations
+private val counter = AtomicInteger(0)
+private val flag = AtomicBoolean(false)
+
+// Safe: ConcurrentHashMap
+private val playerData = ConcurrentHashMap<UUID, PlayerData>()
+```
+
+## World Thread Access
+
+For world modifications, use `world.execute {}`:
+
+```kotlin
+HytaleServer.SCHEDULED_EXECUTOR.schedule({
+    world.execute {
+        // Safe to modify world here
+        chunk.setBlock(x, y, z, blockType, 0)
+    }
+}, 5, TimeUnit.SECONDS)
+```
+
+## Next Steps
+
+- [Custom Components](/custom-components) - Timed component updates
+- [Handling Events](/handling-events) - Scheduled event responses
+- [Working with Players](/working-with-players) - Delayed player actions

@@ -1,0 +1,224 @@
+---
+title: Your First Plugin
+description: Build a complete Hytale plugin from scratch
+---
+
+**Goal:** Create a plugin that welcomes players and responds to a command.
+
+**Prerequisites:** [Introduction](/introduction), Kotlin basics
+
+## Step 1: Create the Plugin Class
+
+Every plugin extends `JavaPlugin` and receives a `JavaPluginInit`:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import java.util.logging.Level
+
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    override fun setup() {
+        // Called during server setup
+        // Register commands, events here
+        logger.at(Level.INFO).log("MyPlugin setup complete")
+    }
+
+    override fun start() {
+        // Called after all plugins are set up
+        logger.at(Level.INFO).log("MyPlugin started!")
+    }
+
+    override fun shutdown() {
+        // Called during server shutdown
+        // Clean up resources
+        logger.at(Level.INFO).log("MyPlugin shutdown")
+    }
+}
+```
+
+## Step 2: Create the Plugin Manifest
+
+Create `plugin.json` in `src/main/resources/`:
+
+```json
+{
+    "name": "MyPlugin",
+    "group": "com.example",
+    "version": "1.0.0",
+    "main": "com.example.myplugin.MyPlugin",
+    "description": "My first Hytale plugin"
+}
+```
+
+## Step 3: Add a Welcome Message
+
+Register an event listener to greet players:
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+import java.util.concurrent.TimeUnit
+
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    override fun setup() {
+        // Welcome players when they connect
+        eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+
+            // Delay message so player fully loads
+            HytaleServer.SCHEDULED_EXECUTOR.schedule({
+                val player = playerRef.holder?.getComponent(Player.getComponentType())
+                player?.sendMessage(Message.raw("Welcome to the server!"))
+            }, 3, TimeUnit.SECONDS)
+        }
+
+        logger.at(Level.INFO).log("MyPlugin setup complete")
+    }
+
+    override fun start() {
+        logger.at(Level.INFO).log("MyPlugin started!")
+    }
+
+    override fun shutdown() {
+        logger.at(Level.INFO).log("MyPlugin shutdown")
+    }
+}
+```
+
+## Step 4: Add a Command
+
+Create a simple command:
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.basecommands.CommandBase
+
+class HelloCommand : CommandBase("hello", "server.commands.hello.description") {
+    override fun executeSync(context: CommandContext) {
+        context.sendMessage(Message.raw("Hello from MyPlugin!"))
+    }
+}
+```
+
+Register it in `setup()`:
+
+```kotlin
+override fun setup() {
+    // Register command
+    commandRegistry.registerCommand(HelloCommand())
+
+    // Register event listener
+    eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+        // ... welcome logic
+    }
+
+    logger.at(Level.INFO).log("MyPlugin setup complete")
+}
+```
+
+## Step 5: Build and Deploy
+
+1. Build your plugin:
+```bash
+./gradlew build
+```
+
+2. Copy the JAR to the server:
+```bash
+cp build/libs/myplugin-1.0.0.jar hytale_server/plugins/
+```
+
+3. Start the server and test:
+- Join the server to see the welcome message
+- Type `/hello` to run your command
+
+## Complete Example
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.basecommands.CommandBase
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import java.util.concurrent.TimeUnit
+import java.util.logging.Level
+
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    override fun setup() {
+        // Register command
+        commandRegistry.registerCommand(HelloCommand())
+
+        // Welcome players when they connect
+        eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+
+            HytaleServer.SCHEDULED_EXECUTOR.schedule({
+                val player = playerRef.holder?.getComponent(Player.getComponentType())
+                player?.sendMessage(Message.raw("Welcome to the server!"))
+            }, 3, TimeUnit.SECONDS)
+        }
+
+        logger.at(Level.INFO).log("MyPlugin setup complete")
+    }
+
+    override fun start() {
+        logger.at(Level.INFO).log("MyPlugin started!")
+    }
+
+    override fun shutdown() {
+        logger.at(Level.INFO).log("MyPlugin shutdown")
+    }
+}
+
+class HelloCommand : CommandBase("hello", "server.commands.hello.description") {
+    override fun executeSync(context: CommandContext) {
+        context.sendMessage(Message.raw("Hello from MyPlugin!"))
+    }
+}
+```
+
+## Plugin Lifecycle
+
+Your plugin goes through these states:
+
+```
+NONE → SETUP → START → ENABLED → SHUTDOWN → DISABLED
+```
+
+| State | When | What to do |
+|-------|------|------------|
+| `SETUP` | `setup()` called | Register commands, events, assets |
+| `START` | `start()` called | Initialize game logic, start loops |
+| `ENABLED` | Running | Plugin is active |
+| `SHUTDOWN` | `shutdown()` called | Save data, cancel tasks |
+
+## Available Registries
+
+Access these via your plugin instance:
+
+| Registry | Purpose |
+|----------|---------|
+| `eventRegistry` | Register event listeners |
+| `commandRegistry` | Register commands |
+| `taskRegistry` | Schedule tasks (auto-cleanup) |
+| `entityRegistry` | Register custom entities |
+| `blockStateRegistry` | Register custom block states |
+| `assetRegistry` | Register assets |
+
+## Next Steps
+
+- [Project Setup](/project-setup) - Configure Gradle and dependencies
+- [Handling Events](/handling-events) - Listen to more events
+- [Creating Commands](/creating-commands) - Add arguments and subcommands

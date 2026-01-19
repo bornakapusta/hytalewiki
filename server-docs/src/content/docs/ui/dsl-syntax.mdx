@@ -1,0 +1,288 @@
+---
+title: UI DSL Syntax Reference
+description: Complete reference for the Hytale UI domain-specific language
+---
+
+The Hytale UI DSL is a declarative language for defining user interfaces. This page covers the complete syntax.
+
+## File Imports
+
+Import other `.ui` files to reuse their definitions:
+
+```ui
+$Common = "../Common.ui";
+$Sounds = "../Sounds.ui";
+```
+
+Access imported definitions with dot notation:
+```ui
+$Common.@DefaultButtonStyle
+$Sounds.@ButtonsLight
+```
+
+## Variables
+
+### Local Variables (`@`)
+
+Define reusable values within a file:
+
+```ui
+@ButtonHeight = 44;
+@PrimaryColor = #96a9be;
+@DefaultPadding = Padding(Full: 8);
+```
+
+### Component Parameters
+
+Components can accept parameters with defaults:
+
+```ui
+@MyButton = TextButton {
+  @Text = "Default";           // Parameter with default
+  @Anchor = Anchor();          // Empty anchor default
+
+  Text: @Text;
+  Anchor: (...@Anchor, Height: 44);
+};
+```
+
+## Element Types
+
+### Basic Elements
+
+| Element | Description |
+|---------|-------------|
+| `Group` | Container for other elements |
+| `Label` | Text display |
+| `Button` | Clickable button |
+| `TextButton` | Button with text label |
+| `Sprite` | Animated image |
+| `TextField` | Text input |
+| `NumberField` | Numeric input |
+| `CheckBox` | Boolean toggle |
+| `DropdownBox` | Selection list |
+| `ProgressBar` | Progress indicator |
+
+### Element Syntax
+
+```ui
+ElementType #ElementId {
+  Property: Value;
+  Property2: (Nested: Value, Other: Value);
+
+  ChildElement {
+    // ...
+  }
+}
+```
+
+## Element Identifiers (`#`)
+
+Assign IDs for script access:
+
+```ui
+Label #TitleLabel {
+  Text: "Hello";
+}
+
+Group #ButtonContainer {
+  Button #SubmitButton {}
+  Button #CancelButton {}
+}
+```
+
+## Property Values
+
+### Primitives
+
+```ui
+Width: 100;              // Number
+Visible: true;           // Boolean
+Text: "Hello";           // String
+Background: #ff0000;     // Color (hex)
+Background: #ff0000(0.5); // Color with alpha
+```
+
+### Tuples
+
+```ui
+Anchor: (Width: 100, Height: 50, Top: 10);
+Padding: (Full: 8);
+Padding: (Horizontal: 10, Vertical: 5);
+Style: (FontSize: 16, TextColor: #ffffff);
+```
+
+### Style Functions
+
+```ui
+PatchStyle(TexturePath: "Button.png", Border: 12)
+LabelStyle(FontSize: 16, RenderBold: true)
+ButtonStyle(Default: (...), Hovered: (...))
+```
+
+## Spread Operator
+
+Merge properties with `...`:
+
+```ui
+@BaseStyle = (FontSize: 16, TextColor: #ffffff);
+
+@DerivedStyle = (
+  ...@BaseStyle,
+  RenderBold: true
+);
+
+// Result: (FontSize: 16, TextColor: #ffffff, RenderBold: true)
+```
+
+Override specific properties:
+```ui
+@CustomAnchor = (...@DefaultAnchor, Width: 200);
+```
+
+## Layout Modes
+
+Control child element arrangement:
+
+| Mode | Description |
+|------|-------------|
+| `Top` | Stack vertically from top |
+| `Left` | Stack horizontally from left |
+| `Right` | Stack horizontally from right |
+| `Center` | Center horizontally |
+| `Middle` | Center vertically |
+| `CenterMiddle` | Center both axes |
+| `TopScrolling` | Vertical stack with scrollbar |
+| `LeftCenterWrap` | Horizontal wrap, centered |
+
+```ui
+Group {
+  LayoutMode: TopScrolling;
+  ScrollbarStyle: $C.@DefaultScrollbarStyle;
+}
+```
+
+## Anchoring
+
+Position elements relative to parent:
+
+```ui
+Anchor: (
+  Width: 100,
+  Height: 50,
+  Top: 10,      // Distance from top
+  Left: 20,     // Distance from left
+  Right: 0,     // Distance from right
+  Bottom: 0,    // Distance from bottom
+  Horizontal: 8 // Both left and right
+  Vertical: 8   // Both top and bottom
+);
+```
+
+## FlexWeight
+
+Distribute remaining space:
+
+```ui
+Group {
+  LayoutMode: Left;
+
+  Group { Anchor: (Width: 100); }  // Fixed width
+  Group { FlexWeight: 1; }          // Takes remaining space
+  Group { FlexWeight: 2; }          // Takes 2x remaining space
+}
+```
+
+## Button States
+
+Define visual states for interactive elements:
+
+```ui
+@ButtonStyle = ButtonStyle(
+  Default: (Background: "Button.png"),
+  Hovered: (Background: "ButtonHovered.png"),
+  Pressed: (Background: "ButtonPressed.png"),
+  Disabled: (Background: "ButtonDisabled.png"),
+  Sounds: @ButtonSounds
+);
+```
+
+## Localization
+
+Reference localized strings with `%`:
+
+```ui
+Text: %server.customUI.shopPage.title;
+Text: %client.general.button.back;
+```
+
+## Comments
+
+Single-line comments:
+```ui
+// This is a comment
+@Width = 100; // Inline comment
+```
+
+## Visibility
+
+Control element visibility:
+
+```ui
+Group #Panel {
+  Visible: false;  // Hidden by default
+}
+```
+
+## Complete Example
+
+```ui
+$C = "../Common.ui";
+$Sounds = "../Sounds.ui";
+
+@TitleStyle = LabelStyle(
+  FontSize: 24,
+  RenderBold: true,
+  HorizontalAlignment: Center
+);
+
+$C.@PageOverlay {
+  LayoutMode: Middle;
+
+  $C.@DecoratedContainer {
+    Anchor: (Width: 500, Height: 300);
+
+    #Title {
+      Label {
+        Style: @TitleStyle;
+        Text: %server.customUI.myPage.title;
+      }
+    }
+
+    #Content {
+      LayoutMode: Top;
+      Padding: (Full: 16);
+
+      $C.@TextField #NameInput {
+        @Anchor = (Bottom: 10);
+        PlaceholderText: "Enter name...";
+      }
+
+      Group {
+        LayoutMode: Center;
+
+        $C.@TextButton #SubmitButton {
+          @Sounds = $Sounds.@SaveSettings;
+          @Text = %server.customUI.submit;
+        }
+
+        $C.@SecondaryTextButton #CancelButton {
+          @Text = %server.customUI.cancel;
+        }
+      }
+    }
+  }
+}
+
+$C.@BackButton {}
+```

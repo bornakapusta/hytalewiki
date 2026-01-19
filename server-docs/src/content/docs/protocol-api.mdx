@@ -1,0 +1,169 @@
+---
+title: Network Protocol
+description: Packet definitions and networking
+---
+
+## Overview
+
+The Hytale network protocol uses a binary packet system over TCP/QUIC with Zstandard compression for large payloads.
+
+- **733 total files** in protocol package
+- **354+ unique packet types** across 17 categories
+- Frame format: `[4-byte LE length][4-byte LE packet ID][payload]`
+
+## Packet Interface
+
+```java
+public interface Packet {
+   int getId();                           // Unique packet ID
+   void serialize(@Nonnull ByteBuf buf);  // Serialize to bytes
+   int computeSize();                     // Calculate serialized size
+}
+```
+
+## Packet Categories
+
+| Category | Count | Purpose |
+|----------|-------|---------|
+| **Connection** | 7 | Handshake, keep-alive, disconnect |
+| **Authentication** | 9 | Auth tokens, password validation |
+| **Setup** | 16 | World init, asset loading |
+| **Player** | 20 | Movement, placement, interactions |
+| **Entities** | 7 | Entity updates, knockback, mounting |
+| **World** | 35 | Terrain, blocks, particles, sounds |
+| **Assets** | 46 | Dynamic asset data |
+| **Inventory** | 10 | Item manipulation, crafting |
+| **Interface** | 41 | Chat, player list, UI |
+| **Window** | 16 | Crafting windows, UI state |
+| **Interaction** | 6 | NPC interactions |
+| **Camera** | 4 | Camera modes, effects |
+| **Builder Tools** | 46 | Editor selection, transformation |
+| **Asset Editor** | 72 | Asset editor protocol |
+| **Machinima** | 4 | Cinematics |
+| **World Map** | 11 | Minimap data |
+| **Server Access** | 4 | Feature flags |
+
+## Example Packet: Connect
+
+```java
+public class Connect implements Packet {
+   public static final int PACKET_ID = 0;
+   public static final boolean IS_COMPRESSED = false;
+   public static final int MAX_SIZE = 38161;
+
+   @Nonnull public String protocolHash = "";
+   @Nonnull public ClientType clientType = ClientType.Game;
+   @Nullable public String language;
+   @Nullable public String identityToken;
+   @Nonnull public UUID uuid = new UUID(0L, 0L);
+   @Nonnull public String username = "";
+
+   @Override public int getId() { return 0; }
+   public static Connect deserialize(@Nonnull ByteBuf buf, int offset) { ... }
+   @Override public void serialize(@Nonnull ByteBuf buf) { ... }
+}
+```
+
+## PacketRegistry
+
+Central dispatch for all packets:
+
+```java
+public class PacketRegistry {
+   public record PacketInfo(
+      int id,
+      String name,
+      Class<? extends Packet> type,
+      int fixedBlockSize,
+      int maxSize,
+      boolean compressed,
+      Function<ValidationResult> validate,
+      BiFunction<ByteBuf, Integer, Packet> deserialize
+   ) {}
+
+   @Nullable public static PacketInfo getById(int id)
+   @Nullable public static Integer getId(Class<? extends Packet> type)
+   @Nonnull public static Map<Integer, PacketInfo> all()
+}
+```
+
+## Key Packets
+
+| ID | Name | Compressed | Max Size |
+|----|------|-----------|----------|
+| 0 | Connect | No | 38KB |
+| 1 | Disconnect | No | 16MB |
+| 2 | Ping | No | 29B |
+| 3 | Pong | No | 20B |
+| 20 | WorldSettings | Yes | 1.6GB |
+| 108 | ClientMovement | No | 153B |
+| 161 | EntityUpdates | Yes | 1.6GB |
+
+## Serialization Utilities
+
+### VarInt Encoding
+
+```java
+VarInt.write(ByteBuf, int)      // Encode variable-length int
+VarInt.read(ByteBuf)            // Decode variable-length int
+VarInt.peek(ByteBuf, int)       // Decode without advancing
+VarInt.size(int)                // Calculate required bytes
+```
+
+### PacketIO
+
+```java
+PacketIO.readHalfLE() / writeHalfLE()     // IEEE 754 half-precision
+PacketIO.readVarString() / writeVarString() // Length-prefixed strings
+PacketIO.readUUID() / writeUUID()         // UUID serialization
+PacketIO.writeFramedPacket()              // Complete packet framing
+PacketIO.readFramedPacket()               // Packet deserialization
+```
+
+## Compression
+
+- **Algorithm**: Zstandard (Zstd)
+- **Default Level**: `Zstd.defaultCompressionLevel()`
+- **Config**: `-Dhytale.protocol.compressionLevel`
+- Applied only when `PacketInfo.compressed() == true`
+
+## Connection Lifecycle
+
+1. **Connect** (ID: 0) - Client sends protocol hash, UUID, username
+2. **ConnectAccept** (ID: 14) - Server accepts
+3. **Status** (ID: 10) - Server sends auth status
+4. **WorldSettings** (ID: 20) - World height & required assets
+5. **RequestAssets** (ID: 23) - Client requests assets
+6. **AssetPart** (ID: 25) - Chunked asset data
+7. **WorldLoadFinished** (ID: 22) - Ready to play
+8. **Ping/Pong** (IDs: 2-3) - Keep-alive
+
+## Netty Integration
+
+### PacketDecoder
+
+```java
+// Frame format: [4-byte LE length][4-byte LE packet ID][payload]
+// Min frame: 8 bytes
+// Max payload: 1.6GB
+// Validates against PacketRegistry.maxSize()
+// Handles decompression transparently
+```
+
+### PacketEncoder
+
+```java
+// Supports CachedPacket<T> for optimization
+// Records statistics via PacketStatsRecorder
+@ChannelHandler.Sharable
+```
+
+## Error Handling
+
+```java
+ProtocolException.arrayTooLong(fieldName, actual, max)
+ProtocolException.stringTooLong(fieldName, actual, max)
+ProtocolException.bufferTooSmall(fieldName, required, available)
+ProtocolException.invalidEnumValue(enumName, value)
+ProtocolException.negativeLength(fieldName, value)
+```

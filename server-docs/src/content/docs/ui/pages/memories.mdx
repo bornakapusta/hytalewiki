@@ -1,0 +1,180 @@
+---
+title: Memories UI
+description: UI components for the memories collection and display system
+---
+
+Components for the memories/collectibles system including category browsing and detail views.
+
+## MemoriesPanel.ui
+
+**Purpose**: Main memories browser with category grid and detail panel
+**Location**: `Pages/Memories/MemoriesPanel.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#TitleLabel` | Label | Panel title |
+| `#LeftPanel` | Group | Memory grid section |
+| `#CategoryHeader` | Group | Category name and count |
+| `#CategoryTitle` | Label | Current category name |
+| `#CategoryCount` | Label | Discovery progress (e.g., "5/12") |
+| `#IconList` | Group | Memory icon grid |
+| `#BackButton` | SecondaryTextButton | Return to categories |
+| `#RightPanel` | Group | Memory details section |
+| `#Background` | Group | Detail panel background |
+| `#MemoryName` | Label | Selected memory name |
+| `#MemoryIcon` | AssetImage | Large memory icon (200x200) |
+| `#MemoryTimeLocation` | Label | Discovery info |
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Height: 825, Width: 1070);
+
+  #Content {
+    LayoutMode: Top;
+
+    Group {
+      LayoutMode: Left;
+      FlexWeight: 1;
+
+      // Left Panel - Memory Grid
+      Group #LeftPanel {
+        FlexWeight: 1;
+        LayoutMode: Top;
+
+        Group #CategoryHeader {
+          LayoutMode: Left;
+
+          Label #CategoryTitle {
+            Style: (...@TitleStyle, TextColor: #89899f);
+          }
+
+          Group { FlexWeight: 1; }
+
+          Label #CategoryCount {
+            Style: (...@TitleStyle, TextColor: #89899f);
+            Text: "0/0";
+          }
+        }
+
+        Group {
+          FlexWeight: 1;
+          LayoutMode: TopScrolling;
+          ScrollbarStyle: $C.@DefaultScrollbarStyle;
+
+          Group #IconList {
+            LayoutMode: LeftCenterWrap;
+          }
+        }
+      }
+
+      // Right Panel - Memory Details
+      Group #RightPanel {
+        FlexWeight: 1;
+
+        Group #Background {
+          Background: (TexturePath: "ContainerBackgroundSecondary.png", Border: 23);
+
+          Label #MemoryName {
+            Style: (...@MemoryTitleStyle, HorizontalAlignment: Center);
+          }
+
+          AssetImage #MemoryIcon {
+            Anchor: (Width: 200, Height: 200);
+          }
+
+          Label #MemoryTimeLocation {
+            Style: (...@TitleStyle, TextColor: #565a68);
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+## MemoriesCategoryPanel.ui
+
+**Purpose**: Category selection panel with icons
+**Location**: `Pages/Memories/MemoriesCategoryPanel.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#CategoryList` | Group | Grid of category buttons |
+| `#TotalProgress` | Label | Overall discovery progress |
+
+Grid view of available memory categories for browsing.
+
+## MemoriesCategory.ui
+
+**Purpose**: Individual category button
+**Location**: `Pages/Memories/MemoriesCategory.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | TextButton | Category selection button |
+| `#Icon` | AssetImage | Category icon |
+| `#Name` | Label | Category name |
+| `#Progress` | Label | Category progress |
+
+Button element for selecting a memory category.
+
+## Memory.ui
+
+**Purpose**: Individual memory tile in grid
+**Location**: `Pages/Memories/Memory.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#EmptyBackground` | Group | Undiscovered state (with tooltip) |
+| `#ButtonNotSelected` | TextButton | Discovered, not selected state |
+| `#ButtonSelected` | TextButton | Currently selected state |
+| `#Icon` | AssetImage | Memory icon (128x128) |
+
+```ui
+Group {
+  Anchor: (Width: 144, Height: 176, Right: 16, Bottom: 16);
+
+  Group #EmptyBackground {
+    Visible: false;
+    Background: (TexturePath: "Tiles/TileEmpty.png", Border: 8);
+    TooltipText: %server.memories.general.undiscovered.tooltipText;
+    TextTooltipStyle: $C.@DefaultTextTooltipStyle;
+  }
+
+  TextButton #ButtonNotSelected {
+    Visible: false;
+    Style: (
+      Sounds: $Sounds.@ButtonsLight,
+      Default: (Background: (TexturePath: "Tiles/TileDefault.png", Border: 8)),
+      Hovered: (Background: (TexturePath: "Tiles/TileHovered.png", Border: 8))
+    );
+  }
+
+  TextButton #ButtonSelected {
+    Visible: false;
+    Style: (
+      Default: (Background: (TexturePath: "Tiles/TileSelected.png", Border: 8))
+    );
+  }
+
+  Group {
+    LayoutMode: Middle;
+
+    AssetImage #Icon {
+      Anchor: (Width: 128, Height: 128);
+    }
+  }
+}
+```
+
+## ChestMarker.ui
+
+**Purpose**: Map marker for memory chest locations
+**Location**: `Pages/Memories/ChestMarker.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Marker` | Group | Map marker visual |
+| `#Icon` | Sprite | Chest icon |
+
+Map overlay element showing the location of undiscovered memory chests.

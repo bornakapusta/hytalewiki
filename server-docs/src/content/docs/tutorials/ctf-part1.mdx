@@ -1,0 +1,585 @@
+---
+title: "Capture The Flag Part 1: Flag System"
+description: Learn flag mechanics, pickup/drop handling, and carrier tracking
+---
+
+**Goal:** Build a flag system with pickup, drop, and return mechanics.
+
+**Prerequisites:** [Handling Events](/handling-events), [Working with Players](/working-with-players)
+
+**Series:** Part 1 of 4 | [Part 2: Team Bases](/tutorials/ctf-part2) | [Part 3: Scoring](/tutorials/ctf-part3) | [Part 4: Game Flow](/tutorials/ctf-part4)
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **Flag state machines** - Modeling flag positions (at base, carried, dropped)
+- **Proximity detection** - Detecting when players touch flags
+- **Scheduled returns** - Auto-returning dropped flags after timeout
+- **Carrier tracking** - Linking flags to player entities
+
+---
+
+## Understanding Flag State
+
+A flag can be in three states:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FLAG STATES                          │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│   AT_BASE ──────pickup──────> CARRIED                  │
+│      ↑                           │                     │
+│      │                           │                     │
+│   return                       drop                    │
+│   (auto)                         │                     │
+│      │                           ↓                     │
+│      └────────timeout─────── DROPPED                   │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Why A State Machine?
+
+**Problem:** Without clear states, you end up with boolean soup:
+
+```kotlin
+// BAD: Multiple booleans that can conflict
+class Flag {
+    var isPickedUp = false
+    var isDropped = false
+    var isAtBase = false  // What if isPickedUp AND isAtBase are both true?
+}
+```
+
+**Solution:** Use an enum that guarantees exactly one state:
+
+```kotlin
+// GOOD: One variable, impossible invalid states
+enum class FlagState {
+    AT_BASE,    // Flag is at its home base
+    CARRIED,    // A player is carrying the flag
+    DROPPED     // Flag is on the ground (will auto-return)
+}
+```
+
+---
+
+## Flag Data Model
+
+```kotlin
+import com.hytale.server.world.BlockPosition
+import java.util.UUID
+import java.util.concurrent.ScheduledFuture
+
+data class Flag(
+    val team: Team,                          // Which team owns this flag
+    val basePosition: BlockPosition,         // Where the flag spawns
+    var currentPosition: BlockPosition,      // Where the flag currently is
+    var state: FlagState = FlagState.AT_BASE,
+    var carrierId: UUID? = null,             // Who is carrying it (if anyone)
+    var returnTask: ScheduledFuture<*>? = null  // Auto-return timer
+) {
+    // WHY: Computed property makes intent clear
+    val isAtBase: Boolean
+        get() = state == FlagState.AT_BASE
+
+    // WHY: Null check in one place instead of scattered throughout code
+    val isCarried: Boolean
+        get() = carrierId != null
+}
+
+enum class FlagState {
+    AT_BASE,
+    CARRIED,
+    DROPPED
+}
+
+enum class Team {
+    RED, BLUE
+}
+```
+
+### Why Store Both `carrierId` and `state`?
+
+You might think `carrierId != null` is enough to know if it's carried. Here's why we need both:
+
+```kotlin
+// Scenario: Player picks up flag, then disconnects
+
+// With just carrierId:
+if (carrierId != null) {
+    // Is this player still online? Still alive? We don't know!
+}
+
+// With state + carrierId:
+when (state) {
+    CARRIED -> {
+        // We KNOW someone is carrying it
+        // carrierId tells us WHO
+    }
+    DROPPED -> {
+        // carrierId might still have the last carrier's ID
+        // for kill attribution, but flag is on ground
+    }
+}
+```
+
+---
+
+## Flag Manager
+
+```kotlin
+import com.hytale.server.HytaleServer
+import com.hytale.server.world.BlockPosition
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+class FlagManager {
+    // WHY ConcurrentHashMap: Multiple threads may access (main thread + scheduled tasks)
+    private val flags = ConcurrentHashMap<Team, Flag>()
+
+    // WHY: Track which player carries which flag for fast lookup
+    private val carrierToFlag = ConcurrentHashMap<UUID, Flag>()
+
+    companion object {
+        // WHY: Constants at top for easy tuning
+        const val PICKUP_RADIUS = 2.0      // Blocks from flag center
+        const val RETURN_DELAY_SECONDS = 30L
+    }
+
+    fun initializeFlag(team: Team, basePosition: BlockPosition) {
+        val flag = Flag(
+            team = team,
+            basePosition = basePosition,
+            currentPosition = basePosition
+        )
+        flags[team] = flag
+
+        // WHY: Log initialization for debugging spawn point issues
+        println("[CTF] ${team.name} flag initialized at $basePosition")
+    }
+
+    fun getFlag(team: Team): Flag? = flags[team]
+
+    fun getFlagCarriedBy(playerId: UUID): Flag? = carrierToFlag[playerId]
+
+    fun getAllFlags(): Collection<Flag> = flags.values
+}
+```
+
+---
+
+## Flag Pickup Logic
+
+This is where state transitions happen:
+
+```kotlin
+// Add to FlagManager
+
+fun tryPickupFlag(playerId: UUID, playerTeam: Team, playerPosition: BlockPosition): PickupResult {
+    // WHY: Check all flags, not just enemy flag
+    // Edge case: Own flag might be dropped and need returning
+    for (flag in flags.values) {
+        if (!isWithinPickupRange(playerPosition, flag.currentPosition)) {
+            continue
+        }
+
+        // Case 1: Enemy flag - pick it up
+        if (flag.team != playerTeam && flag.state != FlagState.CARRIED) {
+            return pickupEnemyFlag(flag, playerId)
+        }
+
+        // Case 2: Own flag dropped - return it
+        if (flag.team == playerTeam && flag.state == FlagState.DROPPED) {
+            return returnOwnFlag(flag, playerId)
+        }
+
+        // Case 3: Own flag at base - nothing happens
+        // (This is where you'd score if carrying enemy flag)
+    }
+
+    return PickupResult.NO_FLAG_NEARBY
+}
+
+private fun pickupEnemyFlag(flag: Flag, playerId: UUID): PickupResult {
+    // WHY: Cancel any pending return timer
+    flag.returnTask?.cancel(false)
+    flag.returnTask = null
+
+    // WHY: Update state BEFORE adding to carrier map
+    // Prevents race condition where another thread sees
+    // the carrier but flag state is wrong
+    flag.state = FlagState.CARRIED
+    flag.carrierId = playerId
+
+    carrierToFlag[playerId] = flag
+
+    return PickupResult.PICKED_UP_ENEMY_FLAG
+}
+
+private fun returnOwnFlag(flag: Flag, playerId: UUID): PickupResult {
+    // WHY: Cancel return timer - player beat the clock
+    flag.returnTask?.cancel(false)
+    flag.returnTask = null
+
+    // Reset to base
+    flag.state = FlagState.AT_BASE
+    flag.currentPosition = flag.basePosition
+    flag.carrierId = null
+
+    return PickupResult.RETURNED_OWN_FLAG
+}
+
+private fun isWithinPickupRange(player: BlockPosition, flag: BlockPosition): Boolean {
+    // WHY: Use squared distance to avoid expensive sqrt calculation
+    val dx = player.x - flag.x
+    val dy = player.y - flag.y
+    val dz = player.z - flag.z
+    val distanceSquared = dx * dx + dy * dy + dz * dz
+    return distanceSquared <= PICKUP_RADIUS * PICKUP_RADIUS
+}
+
+enum class PickupResult {
+    PICKED_UP_ENEMY_FLAG,
+    RETURNED_OWN_FLAG,
+    NO_FLAG_NEARBY
+}
+```
+
+### Why Check Distance Squared?
+
+```kotlin
+// BAD: Uses sqrt (expensive)
+val distance = sqrt(dx*dx + dy*dy + dz*dz)
+return distance <= PICKUP_RADIUS
+
+// GOOD: Compare squared values (fast)
+val distanceSquared = dx*dx + dy*dy + dz*dz
+return distanceSquared <= PICKUP_RADIUS * PICKUP_RADIUS
+
+// WHY: sqrt is slow. If you're checking every player every tick,
+// this optimization matters. 100 players = 100 fewer sqrt calls per tick.
+```
+
+---
+
+## Flag Drop Logic
+
+When a carrier dies or disconnects:
+
+```kotlin
+// Add to FlagManager
+
+fun dropFlag(playerId: UUID, dropPosition: BlockPosition): Boolean {
+    val flag = carrierToFlag.remove(playerId) ?: return false
+
+    // WHY: Update position BEFORE state
+    // If another thread checks state and sees DROPPED,
+    // currentPosition should already be correct
+    flag.currentPosition = dropPosition
+    flag.state = FlagState.DROPPED
+    flag.carrierId = null  // WHY: Clear carrier but we could keep for "last carrier" stats
+
+    // Schedule auto-return
+    scheduleAutoReturn(flag)
+
+    return true
+}
+
+private fun scheduleAutoReturn(flag: Flag) {
+    // WHY: Cancel existing task if somehow one exists
+    flag.returnTask?.cancel(false)
+
+    flag.returnTask = HytaleServer.SCHEDULED_EXECUTOR.schedule(
+        {
+            // WHY: Check state again - player might have returned it manually
+            if (flag.state == FlagState.DROPPED) {
+                returnFlagToBase(flag)
+                broadcastFlagReturned(flag)
+            }
+        },
+        RETURN_DELAY_SECONDS,
+        TimeUnit.SECONDS
+    )
+}
+
+private fun returnFlagToBase(flag: Flag) {
+    flag.state = FlagState.AT_BASE
+    flag.currentPosition = flag.basePosition
+    flag.carrierId = null
+    flag.returnTask = null
+}
+
+private fun broadcastFlagReturned(flag: Flag) {
+    // Implementation depends on your message system
+    println("[CTF] ${flag.team.name} flag returned to base!")
+}
+```
+
+### Why Schedule Instead of Instant Return?
+
+```kotlin
+// BAD: Flag returns instantly when dropped
+fun dropFlag(playerId: UUID, dropPosition: BlockPosition) {
+    returnFlagToBase(flag)  // Boring! No counterplay possible
+}
+
+// GOOD: Give enemies time to pick it up
+fun dropFlag(playerId: UUID, dropPosition: BlockPosition) {
+    flag.state = FlagState.DROPPED
+    scheduleAutoReturn(flag)  // 30 seconds of tension!
+}
+
+// WHY: The dropped state creates gameplay:
+// - Attackers can relay the flag
+// - Defenders can return it by touching
+// - Creates a race to the flag
+```
+
+---
+
+## Proximity Detection
+
+Check for flag interactions each tick:
+
+```kotlin
+import com.hytale.server.world.World
+import com.hytale.server.entity.player.Player
+
+class FlagProximityChecker(
+    private val flagManager: FlagManager,
+    private val teamManager: TeamManager,
+    private val world: World
+) {
+    // WHY: Called from game loop, not event-driven
+    // Events don't fire for "player near position"
+    fun checkAllPlayers() {
+        for (player in world.players) {
+            checkPlayer(player)
+        }
+    }
+
+    private fun checkPlayer(player: Player) {
+        val playerId = player.uuid
+        val playerTeam = teamManager.getTeam(playerId) ?: return
+        val playerPosition = player.position.toBlockPosition()
+
+        when (val result = flagManager.tryPickupFlag(playerId, playerTeam, playerPosition)) {
+            PickupResult.PICKED_UP_ENEMY_FLAG -> {
+                broadcastPickup(player, playerTeam)
+            }
+            PickupResult.RETURNED_OWN_FLAG -> {
+                broadcastReturn(player, playerTeam)
+            }
+            PickupResult.NO_FLAG_NEARBY -> {
+                // Nothing to do
+            }
+        }
+    }
+
+    private fun broadcastPickup(player: Player, team: Team) {
+        val enemyTeam = if (team == Team.RED) Team.BLUE else Team.RED
+        println("[CTF] ${player.name} picked up ${enemyTeam.name} flag!")
+    }
+
+    private fun broadcastReturn(player: Player, team: Team) {
+        println("[CTF] ${player.name} returned ${team.name} flag!")
+    }
+}
+```
+
+### Why Poll Instead of Events?
+
+```kotlin
+// OPTION 1: Event-driven (doesn't exist for "near position")
+@EventHandler
+fun onPlayerNearFlag(event: PlayerNearPositionEvent) {  // This event doesn't exist!
+    // ...
+}
+
+// OPTION 2: Movement event (fires too often, expensive)
+@EventHandler
+fun onMove(event: PlayerMoveEvent) {
+    // WHY NOT: Fires on every tiny movement
+    // 100 players * 20 ticks/second * 100 flags = too much
+}
+
+// OPTION 3: Poll on game tick (what we use)
+fun gameTick() {
+    proximityChecker.checkAllPlayers()  // Once per tick, controlled
+}
+
+// WHY polling wins:
+// - Controllable frequency (every tick vs every movement)
+// - Single iteration over players (not per-movement)
+// - Easy to batch with other tick logic
+```
+
+---
+
+## Carrier Position Updates
+
+The flag follows the carrier:
+
+```kotlin
+// Add to FlagManager
+
+fun updateCarrierPositions(world: World) {
+    for ((playerId, flag) in carrierToFlag) {
+        // WHY: Player might have disconnected between ticks
+        val player = world.getPlayer(playerId)
+        if (player == null) {
+            // Carrier gone - drop the flag at last known position
+            dropFlag(playerId, flag.currentPosition)
+            continue
+        }
+
+        // WHY: Update position so other systems know where flag is
+        // e.g., for rendering flag icon on carrier
+        flag.currentPosition = player.position.toBlockPosition()
+    }
+}
+```
+
+---
+
+## Complete Plugin Setup
+
+Putting it all together:
+
+```kotlin
+import com.hytale.server.JavaPlugin
+import com.hytale.server.HytaleServer
+import com.hytale.server.world.BlockPosition
+import java.util.concurrent.TimeUnit
+
+class CTFPlugin : JavaPlugin() {
+
+    private lateinit var flagManager: FlagManager
+    private lateinit var teamManager: TeamManager
+    private lateinit var proximityChecker: FlagProximityChecker
+
+    override fun onEnable() {
+        flagManager = FlagManager()
+        teamManager = TeamManager()
+
+        // WHY: proximityChecker needs both managers
+        proximityChecker = FlagProximityChecker(
+            flagManager,
+            teamManager,
+            server.world
+        )
+
+        // Initialize flag positions (would come from config in real plugin)
+        flagManager.initializeFlag(Team.RED, BlockPosition(100, 64, 100))
+        flagManager.initializeFlag(Team.BLUE, BlockPosition(-100, 64, -100))
+
+        // Start game loop
+        startGameLoop()
+
+        println("[CTF] Plugin enabled!")
+    }
+
+    private fun startGameLoop() {
+        // WHY: 250ms = 4 ticks per second
+        // Balance between responsiveness and performance
+        HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate(
+            { gameTick() },
+            0,
+            250,
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    private fun gameTick() {
+        // WHY: Order matters!
+        // 1. Update carrier positions first (so proximity check has fresh data)
+        flagManager.updateCarrierPositions(server.world)
+
+        // 2. Then check for pickups/returns
+        proximityChecker.checkAllPlayers()
+    }
+
+    override fun onDisable() {
+        println("[CTF] Plugin disabled!")
+    }
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. Forgetting to Cancel Scheduled Tasks
+
+```kotlin
+// BAD: Return timer keeps running even after manual return
+fun returnOwnFlag(flag: Flag) {
+    flag.state = FlagState.AT_BASE
+    // Oops! returnTask will still fire and reset again!
+}
+
+// GOOD: Always cancel pending tasks
+fun returnOwnFlag(flag: Flag) {
+    flag.returnTask?.cancel(false)
+    flag.returnTask = null
+    flag.state = FlagState.AT_BASE
+}
+```
+
+### 2. Race Conditions with Carrier Map
+
+```kotlin
+// BAD: Check and remove not atomic
+if (carrierToFlag.containsKey(playerId)) {
+    val flag = carrierToFlag[playerId]  // Another thread might remove it here!
+    carrierToFlag.remove(playerId)
+}
+
+// GOOD: Atomic remove-and-return
+val flag = carrierToFlag.remove(playerId) ?: return  // Atomic operation
+```
+
+### 3. Not Handling Disconnects
+
+```kotlin
+// BAD: Carrier disconnects, flag stuck in CARRIED state forever
+@EventHandler
+fun onDisconnect(event: PlayerDisconnectEvent) {
+    // Forgot to drop their flag!
+}
+
+// GOOD: Always clean up on disconnect
+@EventHandler
+fun onDisconnect(event: PlayerDisconnectEvent) {
+    val playerId = event.player.uuid
+    flagManager.dropFlag(playerId, /* last position */)
+}
+```
+
+---
+
+## Summary
+
+| Concept | What | Why |
+|---------|------|-----|
+| Flag State Enum | `AT_BASE`, `CARRIED`, `DROPPED` | Impossible invalid states |
+| Proximity Polling | Check distance each tick | No "near position" event exists |
+| Distance Squared | Compare `d²` not `d` | Avoids expensive `sqrt` |
+| Scheduled Return | 30s delay before auto-return | Creates counterplay opportunity |
+| Carrier Map | `UUID → Flag` lookup | Fast "what is this player carrying?" |
+| Atomic Operations | `remove()` returns value | Thread-safe check-and-act |
+
+---
+
+## What's Next
+
+In [Part 2: Team Bases](/tutorials/ctf-part2), you'll learn:
+- Base zone detection
+- Spawn point management
+- Flag capture scoring
+- Base protection rules

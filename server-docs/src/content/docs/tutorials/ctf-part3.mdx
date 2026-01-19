@@ -1,0 +1,671 @@
+---
+title: "Capture The Flag Part 3: Scoring System"
+description: Team scores, player stats, scoreboards, and win conditions
+---
+
+**Goal:** Implement scoring with team points, individual stats, and win conditions.
+
+**Prerequisites:** [Part 2: Team Bases](/tutorials/ctf-part2), [Custom Components](/custom-components)
+
+**Series:** [Part 1: Flag System](/tutorials/ctf-part1) | [Part 2: Team Bases](/tutorials/ctf-part2) | Part 3 of 4 | [Part 4: Game Flow](/tutorials/ctf-part4)
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **Team score tracking** - Counting captures per team
+- **Player stat components** - Individual captures, returns, kills
+- **Win condition checking** - First to X captures
+- **Live scoreboards** - Displaying scores to players
+
+---
+
+## Understanding CTF Scoring
+
+CTF tracks both team and individual performance:
+
+```
+┌──────────────────────────────────────────────────┐
+│               CTF SCOREBOARD                      │
+├──────────────────────────────────────────────────┤
+│  RED TEAM: 2        BLUE TEAM: 1                 │
+│                                                   │
+│  First to 3 captures wins!                       │
+├──────────────────────────────────────────────────┤
+│  Player Stats:                                    │
+│  ┌────────────┬─────┬─────┬─────┬──────┐        │
+│  │ Player     │ Cap │ Ret │ K   │ D    │        │
+│  ├────────────┼─────┼─────┼─────┼──────┤        │
+│  │ Alice      │ 2   │ 1   │ 5   │ 2    │        │
+│  │ Bob        │ 0   │ 3   │ 8   │ 4    │        │
+│  │ Charlie    │ 1   │ 0   │ 3   │ 6    │        │
+│  └────────────┴─────┴─────┴─────┴──────┘        │
+└──────────────────────────────────────────────────┘
+
+Cap = Captures (scored a point)
+Ret = Returns (returned own flag)
+K = Kills
+D = Deaths
+```
+
+---
+
+## Team Score Tracking
+
+```kotlin
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+
+class ScoreManager {
+    // WHY AtomicInteger: Multiple threads may increment
+    // (capture detection thread + potential admin commands)
+    private val teamScores = ConcurrentHashMap<Team, AtomicInteger>()
+
+    // WHY: Configurable win condition
+    var capturesToWin: Int = 3
+
+    init {
+        // WHY: Initialize all teams to 0
+        Team.values().forEach { team ->
+            teamScores[team] = AtomicInteger(0)
+        }
+    }
+
+    fun getScore(team: Team): Int {
+        return teamScores[team]?.get() ?: 0
+    }
+
+    fun addCapture(team: Team, playerId: UUID): CaptureResult {
+        val newScore = teamScores[team]?.incrementAndGet() ?: return CaptureResult.ERROR
+
+        return if (newScore >= capturesToWin) {
+            CaptureResult.GAME_WON
+        } else {
+            CaptureResult.POINT_SCORED
+        }
+    }
+
+    fun checkWinCondition(): Team? {
+        for ((team, score) in teamScores) {
+            if (score.get() >= capturesToWin) {
+                return team
+            }
+        }
+        return null
+    }
+
+    fun reset() {
+        teamScores.values.forEach { it.set(0) }
+    }
+}
+
+enum class CaptureResult {
+    POINT_SCORED,  // Score increased, game continues
+    GAME_WON,      // This capture won the game
+    ERROR          // Something went wrong
+}
+```
+
+### Why `AtomicInteger` Instead of `Int`?
+
+```kotlin
+// BAD: Regular Int with race condition
+private val scores = mutableMapOf<Team, Int>()
+fun addPoint(team: Team) {
+    val current = scores[team] ?: 0  // Thread A reads 2
+    scores[team] = current + 1       // Thread B also reads 2, writes 3
+                                      // Thread A writes 3 (should be 4!)
+}
+
+// GOOD: AtomicInteger is thread-safe
+private val scores = ConcurrentHashMap<Team, AtomicInteger>()
+fun addPoint(team: Team) {
+    scores[team]?.incrementAndGet()  // Atomic operation, always correct
+}
+
+// WHY: Even "simple" increment is read-modify-write (3 operations)
+// AtomicInteger makes it a single atomic operation
+```
+
+---
+
+## Player Stats Component
+
+Track individual player achievements using ECS:
+
+```kotlin
+import com.hytale.server.ecs.component.Component
+import com.hytale.server.ecs.component.ComponentType
+import com.hytale.server.ecs.entity.EntityStore
+import java.util.concurrent.atomic.AtomicInteger
+
+class CTFStatsComponent : Component<EntityStore> {
+    // WHY: Each stat is AtomicInteger for thread safety
+    val captures = AtomicInteger(0)
+    val returns = AtomicInteger(0)
+    val kills = AtomicInteger(0)
+    val deaths = AtomicInteger(0)
+    val flagPickups = AtomicInteger(0)
+    val flagCarryTimeMs = AtomicInteger(0)  // Total time carrying flag
+
+    companion object {
+        // WHY: ComponentType is how the ECS system identifies this component
+        val TYPE: ComponentType<EntityStore, CTFStatsComponent> =
+            ComponentType.create(CTFStatsComponent::class.java)
+    }
+
+    override fun getType(): ComponentType<EntityStore, CTFStatsComponent> = TYPE
+
+    // WHY: Helper methods make code more readable
+    fun recordCapture() = captures.incrementAndGet()
+    fun recordReturn() = returns.incrementAndGet()
+    fun recordKill() = kills.incrementAndGet()
+    fun recordDeath() = deaths.incrementAndGet()
+    fun recordFlagPickup() = flagPickups.incrementAndGet()
+    fun addCarryTime(ms: Int) = flagCarryTimeMs.addAndGet(ms)
+
+    // WHY: Computed stats for scoreboards
+    val kdr: Double
+        get() = if (deaths.get() == 0) kills.get().toDouble()
+                else kills.get().toDouble() / deaths.get()
+
+    // WHY: Reset for new round
+    fun reset() {
+        captures.set(0)
+        returns.set(0)
+        kills.set(0)
+        deaths.set(0)
+        flagPickups.set(0)
+        flagCarryTimeMs.set(0)
+    }
+}
+```
+
+### Why Separate Stats Per Player?
+
+```kotlin
+// BAD: Global map of stats (coupling, harder to clean up)
+val playerKills = mutableMapOf<UUID, Int>()
+val playerDeaths = mutableMapOf<UUID, Int>()
+val playerCaptures = mutableMapOf<UUID, Int>()
+// When player disconnects, must clean up multiple maps
+
+// GOOD: Component attached to player entity
+holder.addComponent(CTFStatsComponent())
+// When player disconnects, component is cleaned up automatically
+
+// WHY ECS approach is better:
+// 1. All stats in one place
+// 2. Automatic lifecycle management
+// 3. Easy to serialize/save
+// 4. Can query "all players with CTFStats" efficiently
+```
+
+---
+
+## Stats Manager
+
+Bridge between game events and stat tracking:
+
+```kotlin
+import com.hytale.server.entity.player.Player
+import com.hytale.server.ecs.component.holder.ComponentHolder
+
+class StatsManager(
+    private val teamManager: TeamManager
+) {
+    // WHY: Attach stats component when player joins CTF
+    fun initializePlayer(player: Player) {
+        val holder = player.entity as? ComponentHolder<EntityStore> ?: return
+
+        // WHY: Check if already has component (reconnect case)
+        if (holder.getComponent(CTFStatsComponent.TYPE) == null) {
+            holder.addComponent(CTFStatsComponent())
+        }
+    }
+
+    fun getStats(player: Player): CTFStatsComponent? {
+        val holder = player.entity as? ComponentHolder<EntityStore> ?: return null
+        return holder.getComponent(CTFStatsComponent.TYPE)
+    }
+
+    // WHY: Separate methods for each stat type
+    // Makes it clear what's being tracked and allows for logging/events
+    fun recordCapture(player: Player) {
+        getStats(player)?.recordCapture()
+        println("[CTF] ${player.name} recorded a capture!")
+    }
+
+    fun recordReturn(player: Player) {
+        getStats(player)?.recordReturn()
+        println("[CTF] ${player.name} recorded a flag return!")
+    }
+
+    fun recordKill(killer: Player, victim: Player) {
+        getStats(killer)?.recordKill()
+        getStats(victim)?.recordDeath()
+    }
+
+    // WHY: Get all stats for scoreboard display
+    fun getAllPlayerStats(): List<PlayerStatsSummary> {
+        // Implementation would iterate through all players
+        return emptyList()  // Placeholder
+    }
+}
+
+data class PlayerStatsSummary(
+    val name: String,
+    val team: Team,
+    val captures: Int,
+    val returns: Int,
+    val kills: Int,
+    val deaths: Int
+)
+```
+
+---
+
+## Kill Attribution
+
+Track who killed whom:
+
+```kotlin
+import com.hytale.server.event.Listener
+import com.hytale.server.ecs.component.builtin.DamageDataComponent
+import com.hytale.server.ecs.component.builtin.DeathComponent
+
+class CombatListener(
+    private val statsManager: StatsManager,
+    private val flagManager: FlagManager
+) : Listener {
+
+    @EventHandler
+    fun onDeath(event: EntityDeathEvent) {
+        val victim = event.entity
+        if (victim !is Player) return
+
+        // WHY: Get death data to find killer
+        val holder = victim.entity as? ComponentHolder<EntityStore> ?: return
+        val deathComponent = holder.getComponent(DeathComponent.TYPE) ?: return
+
+        // WHY: Killer might be null (fall damage, void, etc.)
+        val killerId = deathComponent.killerId
+        if (killerId != null) {
+            val killer = findPlayerByUuid(killerId)
+            if (killer != null) {
+                statsManager.recordKill(killer, victim)
+            }
+        } else {
+            // WHY: Still record the death even without a killer
+            statsManager.getStats(victim)?.recordDeath()
+        }
+
+        // WHY: Handle flag drop on death
+        handleFlagDropOnDeath(victim)
+    }
+
+    private fun handleFlagDropOnDeath(victim: Player) {
+        val carriedFlag = flagManager.getFlagCarriedBy(victim.uuid)
+        if (carriedFlag != null) {
+            flagManager.dropFlag(victim.uuid, victim.position.toBlockPosition())
+            broadcastFlagDropped(carriedFlag, victim)
+        }
+    }
+
+    private fun broadcastFlagDropped(flag: Flag, dropper: Player) {
+        println("[CTF] ${dropper.name} dropped ${flag.team} flag!")
+    }
+}
+```
+
+### The Damage Data Pattern
+
+```kotlin
+// Hytale tracks damage via DamageDataComponent
+
+// When entity takes damage:
+// 1. DamageDataComponent is added/updated
+// 2. Contains: source entity, damage amount, damage type
+
+// When entity dies:
+// 1. DeathComponent is added
+// 2. Contains: killerId (from last DamageDataComponent)
+
+// WHY this matters for CTF:
+// - Kill credit goes to last damager
+// - Can track assists (other recent damagers)
+// - Know if death was PvP or environment (killerId null = environment)
+```
+
+---
+
+## Scoreboard Display
+
+Show scores to players:
+
+```kotlin
+import com.hytale.server.HytaleServer
+import java.util.concurrent.TimeUnit
+
+class ScoreboardManager(
+    private val scoreManager: ScoreManager,
+    private val statsManager: StatsManager
+) {
+    // WHY: Periodic updates instead of on every change
+    // Reduces message spam and network traffic
+    fun startScoreboardUpdates() {
+        HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate(
+            { updateAllScoreboards() },
+            0,
+            5,  // Every 5 seconds
+            TimeUnit.SECONDS
+        )
+    }
+
+    private fun updateAllScoreboards() {
+        val redScore = scoreManager.getScore(Team.RED)
+        val blueScore = scoreManager.getScore(Team.BLUE)
+        val target = scoreManager.capturesToWin
+
+        // WHY: Build message once, send to all
+        val scoreLine = buildScoreLine(redScore, blueScore, target)
+
+        for (player in server.world.players) {
+            // WHY: Action bar is less intrusive than chat
+            player.sendActionBar(scoreLine)
+        }
+    }
+
+    private fun buildScoreLine(red: Int, blue: Int, target: Int): Message {
+        // Format: RED: 2 | BLUE: 1 (First to 3)
+        return Message.raw("§cRED: $red §f| §9BLUE: $blue §7(First to $target)")
+    }
+
+    // WHY: Full scoreboard for /stats command
+    fun sendFullScoreboard(player: Player) {
+        val lines = mutableListOf<String>()
+
+        lines.add("§6===== CTF SCOREBOARD =====")
+        lines.add("")
+
+        // Team scores
+        lines.add("§cRED: ${scoreManager.getScore(Team.RED)} " +
+                  "§f| §9BLUE: ${scoreManager.getScore(Team.BLUE)}")
+        lines.add("§7First to ${scoreManager.capturesToWin} wins!")
+        lines.add("")
+
+        // Top players
+        lines.add("§e--- Top Players ---")
+        val topPlayers = getTopPlayersByCaptures(5)
+        for ((index, summary) in topPlayers.withIndex()) {
+            val teamColor = if (summary.team == Team.RED) "§c" else "§9"
+            lines.add("${index + 1}. $teamColor${summary.name}§f: " +
+                      "${summary.captures} caps, ${summary.kills}/${summary.deaths} K/D")
+        }
+
+        for (line in lines) {
+            player.sendMessage(Message.raw(line))
+        }
+    }
+
+    private fun getTopPlayersByCaptures(limit: Int): List<PlayerStatsSummary> {
+        return statsManager.getAllPlayerStats()
+            .sortedByDescending { it.captures }
+            .take(limit)
+    }
+}
+```
+
+### Why Action Bar Instead of Chat?
+
+```kotlin
+// OPTION 1: Chat messages
+player.sendMessage("RED: 2 | BLUE: 1")
+// Problems:
+// - Spams chat history
+// - Gets lost in other messages
+// - Players might have chat minimized
+
+// OPTION 2: Action bar (above hotbar)
+player.sendActionBar("RED: 2 | BLUE: 1")
+// Benefits:
+// - Always visible
+// - Doesn't pollute chat
+// - Standard location for game status
+
+// OPTION 3: Sidebar scoreboard
+// Benefits:
+// - Persistent, always visible
+// - Can show multiple lines
+// Downsides:
+// - More complex to implement
+// - Takes screen real estate
+
+// WHY we use action bar:
+// - Simple to implement
+// - Good for score updates
+// - Use /stats for full details
+```
+
+---
+
+## Win Condition Handling
+
+Detect and handle game wins:
+
+```kotlin
+class WinHandler(
+    private val scoreManager: ScoreManager,
+    private val statsManager: StatsManager
+) {
+    // WHY: Called after every capture
+    fun checkAndHandleWin(): WinResult {
+        val winningTeam = scoreManager.checkWinCondition() ?: return WinResult.GAME_CONTINUES
+
+        announceWinner(winningTeam)
+        showEndGameStats()
+        scheduleNewRound()
+
+        return WinResult.GAME_ENDED
+    }
+
+    private fun announceWinner(team: Team) {
+        val color = if (team == Team.RED) "§c" else "§9"
+
+        broadcastToAll(Message.raw(""))
+        broadcastToAll(Message.raw("${color}=============================="))
+        broadcastToAll(Message.raw("${color}${team.name} TEAM WINS!"))
+        broadcastToAll(Message.raw("${color}=============================="))
+        broadcastToAll(Message.raw(""))
+    }
+
+    private fun showEndGameStats() {
+        val mvp = findMVP()
+
+        broadcastToAll(Message.raw("§6--- MVP: ${mvp.name} ---"))
+        broadcastToAll(Message.raw("§7Captures: ${mvp.captures} | " +
+                                   "Returns: ${mvp.returns} | " +
+                                   "Kills: ${mvp.kills}"))
+        broadcastToAll(Message.raw(""))
+    }
+
+    private fun findMVP(): PlayerStatsSummary {
+        // WHY: MVP scoring weighs different contributions
+        return statsManager.getAllPlayerStats()
+            .maxByOrNull { calculateMVPScore(it) }
+            ?: PlayerStatsSummary("Nobody", Team.RED, 0, 0, 0, 0)
+    }
+
+    private fun calculateMVPScore(stats: PlayerStatsSummary): Int {
+        // WHY: Captures are most valuable, then returns, then kills
+        return (stats.captures * 100) +
+               (stats.returns * 50) +
+               (stats.kills * 10) -
+               (stats.deaths * 5)
+    }
+
+    private fun scheduleNewRound() {
+        broadcastToAll(Message.raw("§7New round starting in 30 seconds..."))
+
+        HytaleServer.SCHEDULED_EXECUTOR.schedule(
+            { startNewRound() },
+            30,
+            TimeUnit.SECONDS
+        )
+    }
+
+    private fun startNewRound() {
+        scoreManager.reset()
+        // Reset flags, respawn players, etc.
+    }
+}
+
+enum class WinResult {
+    GAME_CONTINUES,
+    GAME_ENDED
+}
+```
+
+### MVP Calculation Logic
+
+```kotlin
+// WHY weight captures highest?
+// Captures directly win the game.
+// A player with 3 captures and 0 kills contributed more than
+// a player with 0 captures and 20 kills.
+
+// Points breakdown:
+// - Capture: 100 points (objective completion)
+// - Return: 50 points (prevented enemy score)
+// - Kill: 10 points (helped team)
+// - Death: -5 points (gave enemy advantage)
+
+// Example:
+// Alice: 2 captures, 1 return, 5 kills, 2 deaths
+// Score: (2*100) + (1*50) + (5*10) - (2*5) = 290
+
+// Bob: 0 captures, 0 returns, 20 kills, 5 deaths
+// Score: (0*100) + (0*50) + (20*10) - (5*5) = 175
+
+// Alice is MVP despite fewer kills - she played the objective!
+```
+
+---
+
+## Complete Scoring Integration
+
+Putting it all together:
+
+```kotlin
+class CTFPlugin : JavaPlugin() {
+
+    private lateinit var scoreManager: ScoreManager
+    private lateinit var statsManager: StatsManager
+    private lateinit var scoreboardManager: ScoreboardManager
+    private lateinit var winHandler: WinHandler
+
+    override fun onEnable() {
+        scoreManager = ScoreManager().apply {
+            capturesToWin = 3  // Configurable
+        }
+
+        statsManager = StatsManager(teamManager)
+        scoreboardManager = ScoreboardManager(scoreManager, statsManager)
+        winHandler = WinHandler(scoreManager, statsManager)
+
+        // Start scoreboard updates
+        scoreboardManager.startScoreboardUpdates()
+
+        // Register combat listener for kill tracking
+        server.eventRegistry.register(this, CombatListener(statsManager, flagManager))
+    }
+
+    // WHY: Called from CaptureDetector when flag is captured
+    fun onFlagCaptured(player: Player, team: Team) {
+        // 1. Add team score
+        val result = scoreManager.addCapture(team, player.uuid)
+
+        // 2. Record individual stat
+        statsManager.recordCapture(player)
+
+        // 3. Announce
+        broadcastCapture(player, team)
+
+        // 4. Check for win
+        if (result == CaptureResult.GAME_WON) {
+            winHandler.checkAndHandleWin()
+        }
+    }
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. Not Initializing Stats Component
+
+```kotlin
+// BAD: Try to record stat without checking component exists
+fun recordKill(player: Player) {
+    player.getComponent<CTFStatsComponent>().recordKill()  // NPE if not initialized!
+}
+
+// GOOD: Safe access with null check
+fun recordKill(player: Player) {
+    getStats(player)?.recordKill()  // Safe - does nothing if null
+}
+```
+
+### 2. Score Race Condition
+
+```kotlin
+// BAD: Check then act (two operations)
+if (teamScores[team]!! < capturesToWin) {
+    teamScores[team] = teamScores[team]!! + 1
+    // Another thread might have added a point between check and increment!
+}
+
+// GOOD: Atomic increment then check
+val newScore = teamScores[team]!!.incrementAndGet()
+if (newScore >= capturesToWin) {
+    // We know FOR SURE this was the winning capture
+}
+```
+
+### 3. Scoreboard Update Spam
+
+```kotlin
+// BAD: Update on every kill
+fun onKill() {
+    updateAllScoreboards()  // 50 kills/minute = 50 broadcasts/minute
+}
+
+// GOOD: Periodic updates
+scheduleAtFixedRate({ updateAllScoreboards() }, 5, TimeUnit.SECONDS)
+// Consistent 12 updates/minute regardless of game pace
+```
+
+---
+
+## Summary
+
+| Concept | What | Why |
+|---------|------|-----|
+| AtomicInteger | Thread-safe counter | Multiple threads may score |
+| ECS Stats Component | Stats attached to entity | Automatic lifecycle, easy querying |
+| MVP Scoring Weights | Captures > Returns > Kills | Reward objective play |
+| Action Bar | Score display | Non-intrusive, always visible |
+| Kill Attribution | DeathComponent.killerId | Credit correct player |
+| Periodic Scoreboard | Update every 5s | Prevent spam, consistent updates |
+
+---
+
+## What's Next
+
+In [Part 4: Game Flow](/tutorials/ctf-part4), you'll learn:
+- Match states (WAITING → COUNTDOWN → PLAYING → ENDED)
+- Player join/leave handling
+- Commands (/ctf join, /ctf stats)
+- Round reset and cleanup

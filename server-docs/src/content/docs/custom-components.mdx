@@ -1,0 +1,336 @@
+---
+title: Custom Components
+description: Create and register your own ECS components
+---
+
+**Goal:** Build a custom component to track player stats.
+
+**Prerequisites:** [Spawning Entities](/spawning-entities)
+
+## Step 1: Understand the ECS Pattern
+
+The ECS (Entity Component System) separates data from behavior:
+
+- **Component** - Data container (position, health, stats)
+- **Entity** - Collection of components (via Holder/Ref)
+- **System** - Logic that processes components
+
+```
+Player Entity
+├── TransformComponent (position)
+├── Player (player data)
+├── UUIDComponent (unique ID)
+└── YourCustomComponent (your data)
+```
+
+## Step 2: Create a Component Class
+
+Implement the `Component` interface:
+
+```kotlin
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Component
+
+class PlayerStatsComponent : Component<EntityStore> {
+    var kills: Int = 0
+    var deaths: Int = 0
+    var blocksPlaced: Int = 0
+    var blocksBroken: Int = 0
+
+    override fun clone(): PlayerStatsComponent {
+        return PlayerStatsComponent().also {
+            it.kills = this.kills
+            it.deaths = this.deaths
+            it.blocksPlaced = this.blocksPlaced
+            it.blocksBroken = this.blocksBroken
+        }
+    }
+
+    override fun cloneSerializable(): Component<EntityStore> = clone()
+}
+```
+
+## Step 3: Add a Codec for Serialization
+
+If your component needs to persist:
+
+```kotlin
+import com.hypixel.hytale.shared.codec.BuilderCodec
+import com.hypixel.hytale.shared.codec.Codec
+import com.hypixel.hytale.shared.codec.KeyedCodec
+
+class PlayerStatsComponent : Component<EntityStore> {
+    var kills: Int = 0
+    var deaths: Int = 0
+    var blocksPlaced: Int = 0
+    var blocksBroken: Int = 0
+
+    companion object {
+        val CODEC: BuilderCodec<PlayerStatsComponent> = BuilderCodec.builder(
+            PlayerStatsComponent::class.java,
+            { PlayerStatsComponent() }
+        )
+            .append(
+                KeyedCodec("kills", Codec.INT),
+                { obj, value -> obj.kills = value },
+                { obj -> obj.kills }
+            )
+            .append(
+                KeyedCodec("deaths", Codec.INT),
+                { obj, value -> obj.deaths = value },
+                { obj -> obj.deaths }
+            )
+            .append(
+                KeyedCodec("blocksPlaced", Codec.INT),
+                { obj, value -> obj.blocksPlaced = value },
+                { obj -> obj.blocksPlaced }
+            )
+            .append(
+                KeyedCodec("blocksBroken", Codec.INT),
+                { obj, value -> obj.blocksBroken = value },
+                { obj -> obj.blocksBroken }
+            )
+            .add()
+            .build()
+    }
+
+    override fun clone(): PlayerStatsComponent { /* ... */ }
+    override fun cloneSerializable(): Component<EntityStore> = clone()
+}
+```
+
+## Step 4: Register the Component Type
+
+Create a component type for access:
+
+```kotlin
+import hytale.ecs.ComponentType
+
+object MyComponents {
+    lateinit var PLAYER_STATS: ComponentType<EntityStore, PlayerStatsComponent>
+        private set
+
+    fun register(registry: ComponentRegistry) {
+        PLAYER_STATS = registry.registerComponent(
+            PlayerStatsComponent::class.java,
+            "PlayerStatsComponent",
+            PlayerStatsComponent.CODEC
+        )
+    }
+}
+```
+
+Register in plugin setup:
+
+```kotlin
+override fun setup() {
+    MyComponents.register(componentRegistry)
+}
+```
+
+## Step 5: Add Component to Entities
+
+When a player connects:
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val holder = event.holder
+
+    // Check if already has component
+    if (holder.getComponent(MyComponents.PLAYER_STATS) == null) {
+        holder.addComponent(MyComponents.PLAYER_STATS, PlayerStatsComponent())
+    }
+}
+```
+
+## Step 6: Access and Modify Components
+
+```kotlin
+fun getPlayerStats(playerRef: PlayerRef): PlayerStatsComponent? {
+    return playerRef.holder?.getComponent(MyComponents.PLAYER_STATS)
+}
+
+fun incrementKills(playerRef: PlayerRef) {
+    getPlayerStats(playerRef)?.let { stats ->
+        stats.kills++
+    }
+}
+
+fun incrementDeaths(playerRef: PlayerRef) {
+    getPlayerStats(playerRef)?.let { stats ->
+        stats.deaths++
+    }
+}
+```
+
+## Step 7: Track Events
+
+```kotlin
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    getPlayerStats(playerRef)?.blocksPlaced++
+}
+
+eventRegistry.register(BreakBlockEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    getPlayerStats(playerRef)?.blocksBroken++
+}
+```
+
+## Complete Example
+
+A full stats tracking plugin:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent
+import com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import com.hypixel.hytale.server.core.universe.world.World
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Component
+import hytale.ecs.ComponentType
+import hytale.ecs.Ref
+import hytale.ecs.Store
+
+// Component
+class PlayerStatsComponent : Component<EntityStore> {
+    var kills: Int = 0
+    var deaths: Int = 0
+    var blocksPlaced: Int = 0
+    var blocksBroken: Int = 0
+
+    fun getKDRatio(): Double {
+        return if (deaths == 0) kills.toDouble() else kills.toDouble() / deaths
+    }
+
+    override fun clone(): PlayerStatsComponent {
+        return PlayerStatsComponent().also {
+            it.kills = this.kills
+            it.deaths = this.deaths
+            it.blocksPlaced = this.blocksPlaced
+            it.blocksBroken = this.blocksBroken
+        }
+    }
+
+    override fun cloneSerializable(): Component<EntityStore> = clone()
+}
+
+// Plugin
+class StatsPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    companion object {
+        lateinit var PLAYER_STATS: ComponentType<EntityStore, PlayerStatsComponent>
+            private set
+    }
+
+    override fun setup() {
+        // Register component type
+        // PLAYER_STATS = componentRegistry.registerComponent(...)
+
+        // Add stats to new players
+        eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+            val holder = event.holder
+            if (holder.getComponent(PLAYER_STATS) == null) {
+                holder.addComponent(PLAYER_STATS, PlayerStatsComponent())
+            }
+        }
+
+        // Track block placement
+        eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            playerRef.holder?.getComponent(PLAYER_STATS)?.blocksPlaced++
+        }
+
+        // Track block breaking
+        eventRegistry.register(BreakBlockEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            playerRef.holder?.getComponent(PLAYER_STATS)?.blocksBroken++
+        }
+
+        // Register stats command
+        commandRegistry.registerCommand(StatsCommand())
+    }
+
+    override fun start() {
+        logger.atInfo().log("StatsPlugin started")
+    }
+
+    override fun shutdown() {
+        logger.atInfo().log("StatsPlugin shutdown")
+    }
+}
+
+// Command to view stats
+class StatsCommand : AbstractPlayerCommand("stats", "View your stats") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val stats = playerRef.holder?.getComponent(StatsPlugin.PLAYER_STATS)
+        if (stats == null) {
+            context.sendMessage(Message.raw("No stats found"))
+            return
+        }
+
+        context.sendMessage(Message.raw("=== Your Stats ==="))
+        context.sendMessage(Message.raw("Kills: ${stats.kills}"))
+        context.sendMessage(Message.raw("Deaths: ${stats.deaths}"))
+        context.sendMessage(Message.raw("K/D Ratio: ${"%.2f".format(stats.getKDRatio())}"))
+        context.sendMessage(Message.raw("Blocks Placed: ${stats.blocksPlaced}"))
+        context.sendMessage(Message.raw("Blocks Broken: ${stats.blocksBroken}"))
+    }
+}
+```
+
+## Using Store and Ref
+
+For direct store access:
+
+```kotlin
+fun modifyViaStore(world: World, ref: Ref<EntityStore>) {
+    val store = world.entityStore.store
+
+    // Get component
+    val stats = store.getComponent(ref, StatsPlugin.PLAYER_STATS)
+
+    // Modify
+    stats?.kills++
+
+    // Put back (if needed for specific component types)
+    // store.putComponent(ref, StatsPlugin.PLAYER_STATS, stats)
+}
+```
+
+## Common Marker Components
+
+Simple components without data act as tags:
+
+```kotlin
+class Invulnerable : Component<EntityStore> {
+    override fun clone() = Invulnerable()
+    override fun cloneSerializable() = clone()
+}
+
+// Check if entity is invulnerable
+if (holder.getComponent(INVULNERABLE) != null) {
+    // Skip damage
+}
+```
+
+## Next Steps
+
+- [Component List](/ecs-components) - All built-in components
+- [Spawning Entities](/spawning-entities) - Add components to entities
+- [API Reference](/api-reference) - Component types and methods

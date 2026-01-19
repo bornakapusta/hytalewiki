@@ -1,0 +1,108 @@
+---
+title: Navigation & Warping UI
+description: UI components for warp points, instance management, and teleportation
+---
+
+Components for managing warp points, world instances, and player navigation.
+
+## WarpListPage.ui
+
+**Purpose**: Searchable list of available warp points
+**Location**: `Pages/WarpListPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#WarpList` | Group | Scrollable warp entries |
+| `#SearchInput` | CompactTextField | Warp search (via HeaderSearch) |
+
+```ui
+$C.@Container {
+  Anchor: (Width: 600, Height: 700);
+
+  #Title {
+    Group {
+      $C.@Title { @Text = %server.customUI.warpListPage.warps; }
+      $C.@HeaderSearch {}
+    }
+  }
+
+  #Content {
+    LayoutMode: Left;
+
+    Group #WarpList {
+      FlexWeight: 1;
+      LayoutMode: TopScrolling;
+      ScrollbarStyle: $C.@DefaultScrollbarStyle;
+    }
+  }
+}
+```
+
+## WarpEntryButton.ui
+
+**Purpose**: Individual warp point button in list
+**Location**: `Pages/WarpEntryButton.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | Button | Clickable warp entry |
+| `#Name` | Label | Warp name (bold) |
+| `#World` | Label | World name (italic, dimmed) |
+
+```ui
+Button #Button {
+  Padding: (Full: 6);
+  LayoutMode: Left;
+  Style: (Hovered: (Background: #000000(0.2)));
+
+  Label #Name {
+    Style: (RenderBold: true);
+    FlexWeight: 1;
+  }
+
+  Label #World {
+    Style: (TextColor: #ffffff(0.2), RenderItalics: true);
+  }
+}
+```
+
+## PrefabTeleportPage.ui
+
+**Purpose**: Teleport to prefab locations
+**Location**: `Pages/PrefabTeleportPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#PrefabList` | Group | Available prefab locations |
+| `#SearchInput` | TextField | Prefab search |
+| `#TeleportButton` | TextButton | Teleport action |
+
+Interface for teleporting to specific prefab instances in the world.
+
+## InstanceListPage.ui
+
+**Purpose**: World instance browser and management
+**Location**: `Pages/InstanceListPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#InstanceList` | Group | Available instances |
+| `#CreateButton` | TextButton | Create new instance |
+| `#JoinButton` | TextButton | Join selected instance |
+| `#DeleteButton` | CancelTextButton | Delete instance |
+
+Interface for viewing, creating, and managing world instances.
+
+## ConfigureInstanceBlockPage.ui
+
+**Purpose**: Instance block configuration settings
+**Location**: `Pages/ConfigureInstanceBlockPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#InstanceTypeDropdown` | DropdownBox | Instance type selector |
+| `#MaxPlayersInput` | NumberField | Player limit |
+| `#PrivateToggle` | CheckBox | Private instance flag |
+| `#SaveButton` | TextButton | Save configuration |
+
+Settings page for configuring instance block behavior and properties.

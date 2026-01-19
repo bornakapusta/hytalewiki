@@ -1,0 +1,293 @@
+---
+title: Asset & Codec System
+description: Asset management and serialization
+---
+
+## Overview
+
+The asset system handles loading, decoding, and lifecycle management of game assets using a type-safe codec framework.
+
+## AssetStore
+
+```java
+public abstract class AssetStore<K, T extends JsonAssetWithMap<K, M>, M extends AssetMap<K, T>> {
+    // Load from directory
+    void loadAssetsFromDirectory(Path path)
+
+    // Load from paths
+    void loadAssetsFromPaths(List<Path> paths)
+
+    // Remove assets
+    void removeAssets(Collection<K> keys)
+
+    // Decode single asset
+    T decode(BsonDocument doc, ExtraInfo info)
+}
+```
+
+**Features:**
+- Concurrent decoding with `CompletableFuture`
+- Dependency resolution (loadsAfter/loadsBefore)
+- Asset validation and versioning
+- Contained (nested) asset handling
+- Event-driven architecture
+
+## AssetRegistry
+
+Global registry of all asset stores:
+
+```java
+public class AssetRegistry {
+    void register(AssetStore<?, ?, ?> store)
+    void unregister(AssetStore<?, ?, ?> store)
+    AssetStore<?, ?, ?> getAssetStore(Class<?> assetType)
+}
+```
+
+## Loading Pipeline
+
+1. Files discovered via `walkFileTree()`
+2. `RawAsset` objects created with deferred key resolution
+3. Batch decoding (parents first, then children)
+4. Contained assets extracted and loaded recursively
+5. `AssetRegistry` updated
+6. Events dispatched (`LoadedAssetsEvent`, etc.)
+
+## Asset Types
+
+**Asset Maps:**
+- `DefaultAssetMap` - General string keys
+- `BlockTypeAssetMap` - Optimized integer indexing
+- `IndexedAssetMap` - Indexed lookup
+
+## Codec System
+
+### Core Interface
+
+```java
+public interface Codec<T> {
+    T decode(BsonValue value, ExtraInfo info)
+    BsonValue encode(T value, ExtraInfo info)
+    T decodeJson(RawJsonReader reader, ExtraInfo info)
+}
+```
+
+### Predefined Codecs
+
+| Codec | Type |
+|-------|------|
+| `Codec.STRING` | String |
+| `Codec.BOOLEAN` | Boolean |
+| `Codec.INTEGER` | Integer |
+| `Codec.LONG` | Long |
+| `Codec.FLOAT` | Float |
+| `Codec.DOUBLE` | Double |
+| `Codec.UUID_BINARY` | UUID (binary) |
+| `Codec.UUID_STRING` | UUID (string) |
+| `Codec.PATH` | Path |
+| `Codec.INSTANT` | Instant |
+| `Codec.DURATION` | Duration |
+
+### Array Codecs
+
+```java
+Codec.BYTE_ARRAY
+Codec.INT_ARRAY
+Codec.LONG_ARRAY
+Codec.FLOAT_ARRAY
+Codec.DOUBLE_ARRAY
+Codec.STRING_ARRAY
+```
+
+## BuilderCodec
+
+Main codec implementation with field-based construction:
+
+```java
+BuilderCodec<MyClass> codec = BuilderCodec.builder(MyClass.class, MyClass::new)
+    .append(
+        new KeyedCodec<>("FieldName", Codec.STRING),
+        MyClass::setField,
+        MyClass::getField
+    )
+    .documentation("Field description")
+    .add()
+    .versioned()
+    .afterDecode(obj -> obj.initialize())
+    .build();
+```
+
+**Features:**
+- BSON and JSON encoding/decoding
+- Inheritance chains
+- Version tracking and migration
+- Schema generation
+- Custom validators
+- Post-decode callbacks
+
+## KeyedCodec
+
+Wraps codec with field key:
+
+```java
+KeyedCodec<String> field = new KeyedCodec<>("FieldName", Codec.STRING);
+
+// Get value
+String value = field.get(document, extraInfo);
+String valueOrDefault = field.getOrDefault(document, "default", extraInfo);
+
+// Put value
+field.put(document, "value", extraInfo);
+```
+
+## InheritCodec
+
+Supports inheritance from parent objects:
+
+```java
+public interface InheritCodec<T> extends Codec<T> {
+    T decodeAndInherit(BsonDocument doc, T parent, ExtraInfo info)
+}
+```
+
+## ExtraInfo
+
+Context passed through codec chain:
+
+```java
+public class ExtraInfo {
+    // Key tracking for error reporting
+    void pushKey(String key)
+    void popKey()
+    String peekKey(String separator)
+
+    // Unknown key tracking
+    Set<String> getUnknownKeys()
+    void addUnknownKey(String key)
+
+    // Validation
+    ValidationResults getValidationResults()
+}
+```
+
+## ContainedAssetCodec
+
+Handles nested assets:
+
+```java
+// Modes:
+// GENERATE_ID - Auto-generate IDs like "*ParentId_fieldName"
+// INHERIT_ID - Use container's ID
+// INHERIT_ID_AND_PARENT - Inherit both ID and parent reference
+// INJECT_PARENT - Generate ID but inject container as parent
+```
+
+## Map Codecs
+
+```java
+// String key maps
+new MapCodec<>(Codec.STRING, HashMap::new)
+
+// Enum key maps
+new EnumMapCodec<>(MyEnum.class, Codec.INTEGER)
+
+// Primitive value maps
+new Object2IntMapCodec<>(Codec.STRING)
+new Object2FloatMapCodec<>(Codec.STRING)
+```
+
+## Validation
+
+```java
+builder.validator((object, results) -> {
+    if (object.getValue() < 0) {
+        results.fail("Value must be positive");
+    }
+})
+```
+
+**Built-in Validators:**
+- `ArrayValidator` - Validate array elements
+- `MapKeyValidator` - Validate map keys
+- `MapValueValidator` - Validate map values
+- `AssetKeyValidator` - Validate asset references
+
+## Schema Generation
+
+```java
+JsonSchema schema = codec.toSchema(new SchemaContext());
+```
+
+Generates JSON Schema with:
+- Property definitions
+- Type constraints
+- Nested object schemas
+- Enum restrictions
+- Documentation
+
+## Asset File Format
+
+**BSON:**
+```bson
+{
+  "Version": 1,
+  "Id": "MyAsset",
+  "Parent": "ParentAsset",
+  "Tag1": ["value1", "value2"],
+  "NestedAssets": {
+    "Nested1": { "Id": "...", ...}
+  }
+}
+```
+
+**JSON (compatible):**
+```json
+{
+  "Version": 1,
+  "Id": "MyAsset",
+  "Parent": "ParentAsset",
+  "Tag1": ["value1", "value2"],
+  "$Comment": "Documentation",
+  "NestedAssets": [
+    {"Id": "...", ...}
+  ]
+}
+```
+
+## Complete Example
+
+```java
+// Define asset class
+public class MyAsset implements JsonAsset<String> {
+    public static final BuilderCodec<MyAsset> CODEC =
+        BuilderCodec.builder(MyAsset.class, MyAsset::new)
+            .append(new KeyedCodec<>("Id", Codec.STRING),
+                    MyAsset::setId, MyAsset::getId)
+            .add()
+            .append(new KeyedCodec<>("Value", Codec.INTEGER),
+                    MyAsset::setValue, MyAsset::getValue)
+            .addValidator(Validators.range(0, 100))
+            .add()
+            .versioned()
+            .build();
+
+    private String id;
+    private int value;
+
+    @Override
+    public String getId() { return id; }
+}
+
+// Register asset store
+HytaleAssetStore.builder(MyAsset.class, new DefaultAssetMap<>())
+    .setPath("Assets/MyAssets")
+    .setCodec(MyAsset.CODEC)
+    .setKeyFunction(MyAsset::getId)
+    .build();
+
+// Load assets
+assetStore.loadAssetsFromDirectory(Paths.get("Assets/MyAssets"));
+
+// Access assets
+MyAsset asset = assetStore.getAssetMap().getAsset("MyAssetId");
+```

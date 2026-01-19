@@ -1,0 +1,899 @@
+---
+title: "PVP Arena Part 3: Combat & Scoring"
+description: Death handling, stats tracking, and elimination modes
+---
+
+**Goal:** Implement death detection, player stats, and configurable elimination modes.
+
+**Prerequisites:** [Part 2: Match Flow](/tutorials/pvp-arena-part2), [Custom Components](/custom-components)
+
+**Series:** [Part 1: Arena Core](/tutorials/pvp-arena-part1) | [Part 2: Match Flow](/tutorials/pvp-arena-part2) | Part 3 of 4 | [Part 4: Commands](/tutorials/pvp-arena-part4)
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **ECS Components** - Attaching custom data to players
+- **Kill attribution** - Tracking who killed whom
+- **Elimination modes** - Different ways to handle death
+- **Spectator mode** - What happens after you die
+
+---
+
+## Understanding Death in Games
+
+When a player dies, many things need to happen:
+
+```
+Player Dies
+    │
+    ├─► Update stats (deaths++)
+    │
+    ├─► Credit killer (kills++)
+    │
+    ├─► Broadcast kill feed
+    │
+    ├─► Handle elimination mode:
+    │       ├─► ELIMINATION: Mark dead, check win
+    │       ├─► RESPAWN: Start respawn timer
+    │       └─► SPECTATOR: Enable flight, hide player
+    │
+    └─► Check win condition
+```
+
+### The Challenge: Who Killed Whom?
+
+```kotlin
+// Simple but wrong:
+fun onPlayerDeath(victim: Player) {
+    // Who was the killer? We don't know!
+}
+
+// Better: Track last attacker
+fun onPlayerDamaged(victim: Player, attacker: Player, damage: Int) {
+    victim.lastAttacker = attacker
+    victim.lastAttackTime = now()
+}
+
+fun onPlayerDeath(victim: Player) {
+    // If attacked within last 10 seconds, credit the kill
+    if (now() - victim.lastAttackTime < 10_000) {
+        victim.lastAttacker.kills++
+    }
+}
+```
+
+---
+
+## Step 1: Create the Stats Component
+
+We need to store per-player data. In Hytale's ECS, we create a **Component**.
+
+### Why a Component?
+
+```kotlin
+// Option A: External map (what we did before)
+val playerStats = ConcurrentHashMap<UUID, Stats>()
+
+// Option B: ECS Component (attached to entity)
+holder.addComponent(ArenaPlayerComponent::class, component)
+
+// Why Component is better:
+// - Data travels with the entity
+// - Automatic cleanup when entity removed
+// - Can query all entities with this component
+// - Standard ECS pattern
+```
+
+### The Component Class
+
+```kotlin
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Component
+import java.util.UUID
+
+/**
+ * Tracks arena-specific data for a player.
+ *
+ * WHY THESE FIELDS?
+ * - team: Which side they're on
+ * - isAlive: Quick check without querying health
+ * - kills/deaths: Core stats for any PVP game
+ * - damageDealt/Taken: Useful for MVP calculation
+ * - lastAttacker: For kill attribution
+ *
+ * WHY MUTABLE FIELDS?
+ * - Stats change frequently during gameplay
+ * - Immutable would require constant object recreation
+ * - Component pattern expects mutation
+ */
+class ArenaPlayerComponent : Component<EntityStore> {
+    // Team assignment
+    var team: Team = Team.SPECTATOR
+
+    // Alive status (faster than checking health component)
+    var isAlive: Boolean = true
+
+    // Combat statistics
+    var kills: Int = 0
+    var deaths: Int = 0
+    var damageDealt: Double = 0.0
+    var damageTaken: Double = 0.0
+
+    // Kill attribution - who last hit this player?
+    var lastAttackerUuid: UUID? = null
+    var lastAttackTime: Long = 0  // System.currentTimeMillis()
+
+    /**
+     * Calculate kill/death ratio.
+     *
+     * WHY CHECK deaths == 0?
+     * - Division by zero would crash or return Infinity
+     * - 5 kills, 0 deaths = 5.0 KD (not infinity)
+     */
+    fun getKDRatio(): Double {
+        return if (deaths == 0) kills.toDouble() else kills.toDouble() / deaths
+    }
+
+    /**
+     * Record that this player was hit.
+     *
+     * WHY TRACK TIME?
+     * - If player dies 30 seconds after being hit, was it really a kill?
+     * - 10 second window is standard in most games
+     * - Handles: fall damage after being knocked off, delayed poison, etc.
+     */
+    fun recordHit(attackerUuid: UUID, damage: Double) {
+        lastAttackerUuid = attackerUuid
+        lastAttackTime = System.currentTimeMillis()
+        damageTaken += damage
+    }
+
+    /**
+     * Reset for new round (keep stats, reset state).
+     */
+    fun resetForRound() {
+        isAlive = true
+        lastAttackerUuid = null
+        lastAttackTime = 0
+    }
+
+    /**
+     * Full reset (new match).
+     */
+    fun resetAll() {
+        resetForRound()
+        kills = 0
+        deaths = 0
+        damageDealt = 0.0
+        damageTaken = 0.0
+    }
+
+    // Required by Component interface
+    override fun clone(): ArenaPlayerComponent {
+        return ArenaPlayerComponent().also {
+            it.team = this.team
+            it.isAlive = this.isAlive
+            it.kills = this.kills
+            it.deaths = this.deaths
+            it.damageDealt = this.damageDealt
+            it.damageTaken = this.damageTaken
+            it.lastAttackerUuid = this.lastAttackerUuid
+            it.lastAttackTime = this.lastAttackTime
+        }
+    }
+
+    override fun cloneSerializable(): Component<EntityStore> = clone()
+}
+```
+
+---
+
+## Step 2: Register the Component Type
+
+Components need a **ComponentType** for access:
+
+```kotlin
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.ComponentType
+
+/**
+ * Registry for our custom components.
+ *
+ * WHY AN OBJECT?
+ * - Singleton pattern - only one registry needed
+ * - lateinit allows initialization during plugin setup
+ * - Other classes access via ArenaComponents.ARENA_PLAYER
+ */
+object ArenaComponents {
+    /**
+     * Component type for ArenaPlayerComponent.
+     *
+     * WHY lateinit?
+     * - Can't initialize until plugin setup() runs
+     * - ComponentRegistry not available at class load time
+     */
+    lateinit var ARENA_PLAYER: ComponentType<EntityStore, ArenaPlayerComponent>
+        private set
+
+    /**
+     * Register all arena components.
+     * Call this in plugin setup().
+     */
+    fun register(registry: ComponentRegistry) {
+        ARENA_PLAYER = registry.registerComponent(
+            ArenaPlayerComponent::class.java,
+            "ArenaPlayerComponent",
+            null  // No codec = not persisted (session-only data)
+        )
+    }
+}
+```
+
+### In Plugin Setup
+
+```kotlin
+override fun setup() {
+    // Register components FIRST (before anything uses them)
+    ArenaComponents.register(componentRegistry)
+
+    // Then create managers...
+    arenaManager = ArenaManager(this, config)
+    // ...
+}
+```
+
+---
+
+## Step 3: Define Elimination Modes
+
+Different games handle death differently:
+
+```kotlin
+/**
+ * What happens when a player dies?
+ *
+ * ELIMINATION: Classic battle royale / last team standing
+ * - Dead players watch until match ends
+ * - Creates tension - each death matters
+ * - Good for: competitive, short matches
+ *
+ * RESPAWN: Team deathmatch style
+ * - Dead players respawn after delay
+ * - Action-focused, less punishing
+ * - Good for: casual, longer matches
+ *
+ * SPECTATOR: Hybrid approach
+ * - Dead players spectate (can fly around, invisible)
+ * - More engaging than staring at death screen
+ * - Good for: learning, streaming
+ */
+enum class EliminationMode {
+    ELIMINATION,  // Dead = out until match ends
+    RESPAWN,      // Respawn after delay
+    SPECTATOR     // Become invisible spectator
+}
+```
+
+### Add to Config
+
+```kotlin
+data class ArenaConfig(
+    // ... existing fields ...
+
+    val eliminationMode: EliminationMode = EliminationMode.RESPAWN,
+    val respawnDelaySeconds: Int = 5
+)
+```
+
+---
+
+## Step 4: Create the Combat Manager
+
+Handles all combat-related logic:
+
+```kotlin
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.entity.entities.player.movement.MovementManager
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+
+/**
+ * Manages combat: damage tracking, death handling, respawning.
+ *
+ * WHY A SEPARATE MANAGER?
+ * - ArenaManager: WHO is playing
+ * - MatchController: WHEN things happen
+ * - CombatManager: HOW combat works
+ *
+ * Single responsibility = easier to modify/test each piece.
+ */
+class CombatManager(
+    private val plugin: JavaPlugin,
+    private val arenaManager: ArenaManager,
+    private val matchController: MatchController
+) {
+    /**
+     * Track players waiting to respawn.
+     *
+     * WHY TRACK THIS?
+     * - Prevent double-respawn if death event fires twice
+     * - Know who's currently dead (for spectator count, etc.)
+     */
+    private val pendingRespawns = mutableSetOf<UUID>()
+
+    val config get() = arenaManager.config
+```
+
+---
+
+## Step 5: Add Component on Join
+
+When a player joins, attach the component:
+
+```kotlin
+    /**
+     * Initialize a player's arena component.
+     *
+     * WHEN TO CALL: After player joins arena, assigned to team.
+     *
+     * WHY CHECK FOR EXISTING?
+     * - Player might reconnect (component persists)
+     * - Avoids duplicate components
+     */
+    fun onPlayerJoin(playerRef: PlayerRef, team: Team) {
+        val holder = playerRef.holder ?: return
+
+        // Get existing or create new
+        var component = holder.getComponent(ArenaComponents.ARENA_PLAYER)
+        if (component == null) {
+            component = ArenaPlayerComponent()
+            holder.addComponent(ArenaComponents.ARENA_PLAYER, component)
+        }
+
+        // Initialize for this match
+        component.team = team
+        component.isAlive = true
+    }
+
+    /**
+     * Get a player's arena stats.
+     *
+     * Returns null if player doesn't have the component
+     * (not in arena, or component not added yet).
+     */
+    fun getPlayerStats(playerRef: PlayerRef): ArenaPlayerComponent? {
+        return playerRef.holder?.getComponent(ArenaComponents.ARENA_PLAYER)
+    }
+
+    /**
+     * Get stats by UUID (when we don't have PlayerRef).
+     */
+    fun getPlayerStats(uuid: UUID): ArenaPlayerComponent? {
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return null
+        val playerRef = world.players.values.find { it.uuid == uuid } ?: return null
+        return getPlayerStats(playerRef)
+    }
+```
+
+---
+
+## Step 6: Track Damage
+
+When a player takes damage:
+
+```kotlin
+    /**
+     * Record damage dealt to a player.
+     *
+     * WHEN TO CALL: On any damage event (combat, fall, etc.)
+     *
+     * WHY TRACK ATTACKER DAMAGE TOO?
+     * - MVP calculation: most damage dealt
+     * - Assists: damaged but didn't get kill
+     * - Balance analysis: which weapons are strongest
+     */
+    fun onPlayerDamage(attackerRef: PlayerRef?, victimRef: PlayerRef, damage: Double) {
+        // Only track during active match
+        if (arenaManager.state != ArenaState.PLAYING) return
+
+        val victimStats = getPlayerStats(victimRef) ?: return
+
+        // Already dead? Ignore (prevents post-mortem damage)
+        if (!victimStats.isAlive) return
+
+        // Record damage on victim
+        if (attackerRef != null) {
+            victimStats.recordHit(attackerRef.uuid, damage)
+
+            // Also credit attacker's damage dealt
+            val attackerStats = getPlayerStats(attackerRef)
+            if (attackerStats != null) {
+                attackerStats.damageDealt += damage
+            }
+        }
+    }
+```
+
+---
+
+## Step 7: Handle Death
+
+The core death handling logic:
+
+```kotlin
+    /**
+     * Handle a player's death.
+     *
+     * This is the central death handler - all deaths go through here.
+     *
+     * FLOW:
+     * 1. Validate (is alive? is match active?)
+     * 2. Update stats (deaths++, mark dead)
+     * 3. Credit killer (if any)
+     * 4. Broadcast kill feed
+     * 5. Handle based on elimination mode
+     * 6. Check if match should end
+     */
+    fun onPlayerDeath(victimRef: PlayerRef) {
+        val victimStats = getPlayerStats(victimRef) ?: return
+        val victimUuid = victimRef.uuid
+
+        // Guard: Already dead (event fired twice?)
+        if (!victimStats.isAlive) return
+
+        // Guard: Match not active
+        if (arenaManager.state != ArenaState.PLAYING) return
+
+        // === 1. Update victim stats ===
+        victimStats.isAlive = false
+        victimStats.deaths++
+        arenaManager.markPlayerDead(victimUuid)
+
+        // === 2. Determine killer ===
+        val killerUuid = victimStats.lastAttackerUuid
+        val timeSinceHit = System.currentTimeMillis() - victimStats.lastAttackTime
+        val hasValidKiller = killerUuid != null && timeSinceHit < 10_000  // 10 second window
+
+        // === 3. Credit kill ===
+        if (hasValidKiller && killerUuid != null) {
+            creditKill(killerUuid, victimRef)
+        }
+
+        // === 4. Broadcast kill feed ===
+        broadcastDeath(victimRef, killerUuid, hasValidKiller)
+
+        // === 5. Handle elimination mode ===
+        when (config.eliminationMode) {
+            EliminationMode.ELIMINATION -> handleElimination(victimRef)
+            EliminationMode.RESPAWN -> handleRespawn(victimRef)
+            EliminationMode.SPECTATOR -> handleSpectator(victimRef)
+        }
+
+        // === 6. Check win condition ===
+        matchController.onPlayerEliminated(victimUuid)
+    }
+```
+
+---
+
+## Step 8: Credit Kills
+
+```kotlin
+    /**
+     * Credit a kill to the attacker.
+     *
+     * WHY SEPARATE METHOD?
+     * - Clear responsibility
+     * - Easy to add: assists, kill streaks, etc.
+     */
+    private fun creditKill(killerUuid: UUID, victimRef: PlayerRef) {
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+        val killerRef = world.players.values.find { it.uuid == killerUuid } ?: return
+        val killerStats = getPlayerStats(killerRef) ?: return
+
+        // Increment kills
+        killerStats.kills++
+
+        // Add team score
+        arenaManager.addTeamScore(killerStats.team)
+
+        // Notify killer
+        arenaManager.sendMessage(killerRef,
+            "You eliminated ${victimRef.username}! (${killerStats.kills} kills)")
+    }
+
+    /**
+     * Broadcast death to all players.
+     *
+     * KILL FEED FORMAT:
+     * - With killer: "PlayerA eliminated PlayerB"
+     * - Without killer: "PlayerB was eliminated" (fall damage, etc.)
+     */
+    private fun broadcastDeath(victimRef: PlayerRef, killerUuid: UUID?, hasKiller: Boolean) {
+        val message = if (hasKiller && killerUuid != null) {
+            val world = plugin.universeService.universe?.worlds?.get("default")
+            val killerName = world?.players?.values
+                ?.find { it.uuid == killerUuid }?.username ?: "Unknown"
+            "$killerName eliminated ${victimRef.username}"
+        } else {
+            "${victimRef.username} was eliminated"
+        }
+
+        arenaManager.broadcast("[KILL] $message")
+    }
+```
+
+---
+
+## Step 9: Elimination Mode Handlers
+
+### Elimination Mode (No Respawn)
+
+```kotlin
+    /**
+     * Handle death in ELIMINATION mode.
+     *
+     * Player stays dead until match ends.
+     * They can spectate but can't interact.
+     */
+    private fun handleElimination(playerRef: PlayerRef) {
+        arenaManager.sendMessage(playerRef,
+            "You've been eliminated! Watch until the match ends.")
+
+        // Put them in spectator mode so they can watch
+        enableSpectatorMode(playerRef)
+    }
+```
+
+### Respawn Mode
+
+```kotlin
+    /**
+     * Handle death in RESPAWN mode.
+     *
+     * Player respawns after a delay at their team's spawn.
+     *
+     * WHY A DELAY?
+     * - Punishment for dying (otherwise death is meaningless)
+     * - Gives enemy team temporary advantage
+     * - Standard in team deathmatch games
+     */
+    private fun handleRespawn(playerRef: PlayerRef) {
+        val uuid = playerRef.uuid
+
+        // Guard: Already waiting to respawn
+        if (pendingRespawns.contains(uuid)) return
+        pendingRespawns.add(uuid)
+
+        // Notify player
+        arenaManager.sendMessage(playerRef,
+            "Respawning in ${config.respawnDelaySeconds} seconds...")
+
+        // Schedule respawn
+        HytaleServer.SCHEDULED_EXECUTOR.schedule({
+            respawnPlayer(playerRef)
+            pendingRespawns.remove(uuid)
+        }, config.respawnDelaySeconds.toLong(), TimeUnit.SECONDS)
+    }
+
+    /**
+     * Actually respawn the player.
+     */
+    private fun respawnPlayer(playerRef: PlayerRef) {
+        // Guard: Match might have ended during respawn delay
+        if (arenaManager.state != ArenaState.PLAYING) return
+
+        val stats = getPlayerStats(playerRef) ?: return
+        val team = stats.team
+
+        // Get team spawn point
+        val spawn = config.teamSpawns[team] ?: config.lobbySpawn
+
+        // Teleport to spawn
+        val holder = playerRef.holder ?: return
+        val transform = holder.getComponent(TransformComponent.getComponentType())
+        transform?.teleportPosition(spawn)
+
+        // Reset state
+        stats.isAlive = true
+        stats.resetForRound()
+        arenaManager.markPlayerAlive(playerRef.uuid)
+
+        // Give fresh loadout
+        matchController.giveLoadout(playerRef)
+
+        arenaManager.sendMessage(playerRef, "You have respawned!")
+    }
+```
+
+### Spectator Mode
+
+```kotlin
+    /**
+     * Handle death in SPECTATOR mode.
+     *
+     * Player becomes invisible spectator who can fly around.
+     */
+    private fun handleSpectator(playerRef: PlayerRef) {
+        arenaManager.sendMessage(playerRef, "You are now spectating.")
+        enableSpectatorMode(playerRef)
+    }
+
+    /**
+     * Enable spectator mode for a player.
+     *
+     * SPECTATOR ABILITIES:
+     * - Flight: Can fly around to watch
+     * - Invisibility: Other players can't see them
+     * - No collision: Can pass through things
+     * - No interaction: Can't break blocks, hit players, etc.
+     */
+    private fun enableSpectatorMode(playerRef: PlayerRef) {
+        val holder = playerRef.holder ?: return
+
+        // Enable flight
+        val movement = holder.getComponent(MovementManager.getComponentType())
+        if (movement != null) {
+            movement.settings.canFly = true
+            movement.update(playerRef.packetHandler)
+        }
+
+        // Clear inventory (can't use items as spectator)
+        val player = holder.getComponent(Player.getComponentType())
+        if (player != null) {
+            player.inventory?.clear()
+            player.sendInventory()
+        }
+
+        // Note: Full invisibility requires additional components
+        // or game mode changes depending on Hytale's API
+    }
+
+    /**
+     * Disable spectator mode (when match ends or respawning).
+     */
+    fun disableSpectatorMode(playerRef: PlayerRef) {
+        val holder = playerRef.holder ?: return
+
+        val movement = holder.getComponent(MovementManager.getComponentType())
+        if (movement != null) {
+            movement.settings.canFly = false
+            movement.update(playerRef.packetHandler)
+        }
+    }
+```
+
+---
+
+## Step 10: Update ArenaManager
+
+Add alive tracking methods:
+
+```kotlin
+class ArenaManager(/* ... */) {
+    // ... existing code ...
+
+    // Team scores
+    private val teamScores = ConcurrentHashMap<Team, Int>()
+
+    init {
+        // ... existing init ...
+        Team.playingTeams.forEach { team ->
+            teamScores[team] = 0
+        }
+    }
+
+    /**
+     * Mark a player as dead (for win condition checking).
+     */
+    fun markPlayerDead(uuid: UUID) {
+        val team = playerTeams[uuid] ?: return
+        alivePlayers[team]?.remove(uuid)
+    }
+
+    /**
+     * Mark a player as alive (after respawn).
+     */
+    fun markPlayerAlive(uuid: UUID) {
+        val team = playerTeams[uuid] ?: return
+        alivePlayers[team]?.add(uuid)
+    }
+
+    /**
+     * Check if a player is alive.
+     */
+    fun isPlayerAlive(uuid: UUID): Boolean {
+        val team = playerTeams[uuid] ?: return false
+        return alivePlayers[team]?.contains(uuid) == true
+    }
+
+    /**
+     * Add score to a team.
+     */
+    fun addTeamScore(team: Team, points: Int = 1) {
+        teamScores.merge(team, points, Int::plus)
+    }
+
+    /**
+     * Get team's score.
+     */
+    fun getTeamScore(team: Team): Int = teamScores[team] ?: 0
+
+    /**
+     * Get all scores.
+     */
+    fun getScoreboard(): Map<Team, Int> = teamScores.toMap()
+
+    // Update reset() to clear scores
+    fun reset() {
+        playerTeams.clear()
+        Team.playingTeams.forEach { team ->
+            alivePlayers[team]?.clear()
+            teamScores[team] = 0
+        }
+        setState(ArenaState.WAITING)
+    }
+}
+```
+
+---
+
+## Step 11: Wire Into Plugin
+
+```kotlin
+class ArenaPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    lateinit var arenaManager: ArenaManager
+    lateinit var matchController: MatchController
+    lateinit var combatManager: CombatManager
+
+    override fun setup() {
+        // 1. Register components first!
+        ArenaComponents.register(componentRegistry)
+
+        // 2. Create config
+        val config = ArenaConfig(
+            eliminationMode = EliminationMode.RESPAWN,
+            respawnDelaySeconds = 5
+        )
+
+        // 3. Create managers (order matters - dependencies)
+        arenaManager = ArenaManager(this, config)
+        matchController = MatchController(this, arenaManager)
+        combatManager = CombatManager(this, arenaManager, matchController)
+
+        registerEvents()
+    }
+
+    private fun registerEvents() {
+        // Player joins
+        eventRegistry.register(PlayerReadyEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            val team = arenaManager.addPlayer(playerRef) ?: return@register
+
+            // Initialize combat component
+            combatManager.onPlayerJoin(playerRef, team)
+
+            matchController.onPlayerJoin()
+        }
+
+        // Player disconnects
+        eventRegistry.register(PlayerDisconnectEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            arenaManager.removePlayer(playerRef.uuid)
+            matchController.onPlayerLeave()
+        }
+
+        // TODO: Register death event when Hytale API provides it
+        // Example of what it might look like:
+        //
+        // eventRegistry.register(PlayerDeathEvent::class.java) { event ->
+        //     val playerRef = event.playerRef ?: return@register
+        //     combatManager.onPlayerDeath(playerRef)
+        // }
+        //
+        // For damage tracking:
+        // eventRegistry.register(EntityDamageEvent::class.java) { event ->
+        //     // Extract attacker, victim, damage amount
+        //     combatManager.onPlayerDamage(attacker, victim, damage)
+        // }
+    }
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. Not Checking isAlive
+
+```kotlin
+// BAD: Can die multiple times
+fun onDeath(player: PlayerRef) {
+    stats.deaths++  // Counts death twice if event fires twice!
+}
+
+// GOOD: Check first
+fun onDeath(player: PlayerRef) {
+    if (!stats.isAlive) return  // Already dead
+    stats.isAlive = false
+    stats.deaths++
+}
+```
+
+### 2. Ignoring Match State
+
+```kotlin
+// BAD: Respawn during ENDED state
+fun respawnPlayer(player: PlayerRef) {
+    teleport(player, spawn)  // Match is over, why respawn?
+}
+
+// GOOD: Check state
+fun respawnPlayer(player: PlayerRef) {
+    if (arenaManager.state != ArenaState.PLAYING) return
+    teleport(player, spawn)
+}
+```
+
+### 3. Kill Attribution Window
+
+```kotlin
+// BAD: Credit kill no matter how long ago
+if (lastAttacker != null) {
+    lastAttacker.kills++  // Hit them 5 minutes ago, still credited?
+}
+
+// GOOD: Time window
+val timeSinceHit = now() - lastAttackTime
+if (lastAttacker != null && timeSinceHit < 10_000) {
+    lastAttacker.kills++
+}
+```
+
+### 4. Forgetting to Clear Respawn Queue
+
+```kotlin
+// BAD: Player stuck in pendingRespawns forever
+pendingRespawns.add(uuid)
+// ... respawn cancelled due to match end ...
+// uuid still in set!
+
+// GOOD: Always remove
+HytaleServer.SCHEDULED_EXECUTOR.schedule({
+    respawnPlayer(playerRef)
+    pendingRespawns.remove(uuid)  // Always remove, even if respawn skipped
+}, delay, TimeUnit.SECONDS)
+```
+
+---
+
+## Summary
+
+In this part, you learned:
+
+| Concept | Why It Matters |
+|---------|---------------|
+| ECS Components | Attach data to entities, auto-cleanup |
+| Kill attribution | Fair crediting with time window |
+| Elimination modes | Different gameplay styles |
+| Spectator mode | Better experience for dead players |
+| State guards | Prevent bugs from duplicate events |
+
+---
+
+## What's Next
+
+In [Part 4: Commands & Polish](/tutorials/pvp-arena-part4), we'll add:
+- Admin and player commands (/arena join, leave, start, stats)
+- Arena boundary protection
+- Lobby damage prevention
+- End-game summary with MVP announcement
+
+You'll learn about **command creation** and **event cancellation**.

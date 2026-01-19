@@ -1,0 +1,192 @@
+---
+title: Project Setup
+description: Configure Gradle and dependencies for Hytale plugins
+---
+
+**Goal:** Set up a Kotlin project for Hytale plugin development.
+
+**Prerequisites:** [Introduction](/introduction), Gradle installed
+
+## Step 1: Create Project Structure
+
+```
+my-plugin/
+├── build.gradle.kts
+├── settings.gradle.kts
+├── gradle.properties
+├── hytale_server/
+│   └── HytaleServer.jar
+└── src/
+    └── main/
+        ├── kotlin/
+        │   └── com/example/myplugin/
+        │       └── MyPlugin.kt
+        └── resources/
+            └── plugin.json
+```
+
+## Step 2: Configure Gradle
+
+**settings.gradle.kts:**
+```kotlin
+rootProject.name = "my-plugin"
+```
+
+**gradle.properties:**
+```properties
+org.gradle.jvmargs=-Xmx2g
+kotlin.jvm.target=25
+```
+
+**build.gradle.kts:**
+```kotlin
+plugins {
+    kotlin("jvm") version "2.3.0"
+    id("com.gradleup.shadow") version "9.0.0-beta12"
+}
+
+group = "com.example"
+version = "1.0.0"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Hytale Server API (compile-only, provided at runtime)
+    compileOnly(files("${project.projectDir}/hytale_server/HytaleServer.jar"))
+
+    // Kotlin stdlib
+    implementation(kotlin("stdlib"))
+}
+
+// Disable default jar, use shadow jar
+tasks.jar {
+    enabled = false
+}
+
+tasks.shadowJar {
+    archiveFileName.set("my-plugin.jar")
+    archiveClassifier.set("")
+
+    mergeServiceFiles()
+
+    // Copy to server plugins folder after build
+    doLast {
+        copy {
+            from(archiveFile)
+            into(file("hytale_server/plugins"))
+        }
+    }
+}
+
+tasks.build {
+    dependsOn(tasks.shadowJar)
+}
+```
+
+## Step 3: Create Plugin Manifest
+
+Create `src/main/resources/plugin.json`:
+
+```json
+{
+    "name": "MyPlugin",
+    "group": "com.example",
+    "version": "1.0.0",
+    "main": "com.example.myplugin.MyPlugin",
+    "description": "My Hytale plugin"
+}
+```
+
+## Step 4: Get the Server JAR
+
+Copy `HytaleServer.jar` from your Hytale server to `hytale_server/`:
+
+```bash
+mkdir -p hytale_server
+cp /path/to/hytale/HytaleServer.jar hytale_server/
+```
+
+## Step 5: Build
+
+```bash
+./gradlew build
+```
+
+Output: `build/libs/my-plugin.jar` (also copied to `hytale_server/plugins/`)
+
+## Development Workflow
+
+1. Write code in `src/main/kotlin/`
+2. Build: `./gradlew build`
+3. Start server: `./hytale_server/start.sh`
+4. Test in-game
+5. Stop server, iterate
+
+## Adding Dependencies
+
+Add libraries to `dependencies` block:
+
+```kotlin
+dependencies {
+    compileOnly(files("${project.projectDir}/hytale_server/HytaleServer.jar"))
+    implementation(kotlin("stdlib"))
+
+    // Example: JSON library
+    implementation("com.google.code.gson:gson:2.10.1")
+
+    // Example: Database
+    implementation("org.jetbrains.exposed:exposed-core:0.45.0")
+}
+```
+
+## Kotlin DSL Helpers
+
+Add useful extensions for cleaner Kotlin code.
+
+Create `src/main/kotlin/com/example/myplugin/utils/EventExtensions.kt`:
+
+```kotlin
+package com.example.myplugin.utils
+
+import com.hypixel.hytale.event.EventRegistration
+import com.hypixel.hytale.event.IBaseEvent
+import com.hypixel.hytale.event.IEventRegistry
+import java.util.function.Consumer
+
+inline fun <reified EventType : IBaseEvent<Void>> IEventRegistry.register(
+    noinline handler: (EventType) -> Unit
+): EventRegistration<Void, EventType>? {
+    return this.register(EventType::class.java, Consumer(handler))
+}
+```
+
+Usage:
+```kotlin
+// Instead of
+eventRegistry.register(PlayerConnectEvent::class.java) { event -> ... }
+
+// Write
+eventRegistry.register<PlayerConnectEvent> { event -> ... }
+```
+
+## Troubleshooting
+
+**"Class file version 69" error:**
+- Ensure Java 25 is installed and configured
+- Set `kotlin.jvm.target=25` in gradle.properties
+
+**Plugin not loading:**
+- Check `plugin.json` is in JAR root
+- Verify `main` class path matches your package
+
+**Missing dependencies at runtime:**
+- Use `implementation` for deps you need at runtime
+- Use shadow plugin to bundle them in JAR
+
+## Next Steps
+
+- [Your First Plugin](/your-first-plugin) - Complete walkthrough
+- [Handling Events](/handling-events) - React to game events
+- [Creating Commands](/creating-commands) - Add commands

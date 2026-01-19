@@ -1,0 +1,114 @@
+---
+title: World & Environment UI
+description: UI components for world tinting, model changing, and launch pad settings
+---
+
+Components for modifying world appearance, entity models, and physics objects.
+
+## TintChunkPage.ui
+
+**Purpose**: Chunk grass tinting with color picker and blur settings
+**Location**: `Pages/TintChunkPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Sigma` | NumberField | Blur sigma value |
+| `#Radius` | NumberField | Tint radius |
+| `#BlurEnabledContainer` | CheckBoxWithLabel | Enable blur toggle |
+| `#ColorPicker` | ColorPicker | RGB color selection |
+| `#HexColor` | TextField | Hex color input |
+| `#ApplyButton` | TextButton | Apply tint action |
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Left: 50, Top: 170, Width: 360);
+
+  #Content {
+    LayoutMode: Top;
+    Padding: (Full: 16);
+
+    Group {
+      LayoutMode: Left;
+
+      Group {
+        LayoutMode: Top;
+        FlexWeight: 1;
+
+        Label { Text: %server.customUI.tintChunkPage.sigma; }
+
+        $C.@NumberField #Sigma {
+          @Anchor = (Width: 60);
+          Value: 5;
+          Format: (MinValue: 0);
+        }
+      }
+
+      Group {
+        LayoutMode: Top;
+        FlexWeight: 1;
+
+        Label { Text: %server.customUI.tintChunkPage.radius; }
+
+        $C.@NumberField #Radius {
+          @Anchor = (Width: 60);
+          Value: 10;
+          Format: (MinValue: 0);
+        }
+      }
+
+      Group {
+        FlexWeight: 1;
+        LayoutMode: Middle;
+
+        $C.@CheckBoxWithLabel #BlurEnabledContainer {
+          @Text = %server.customUI.tintChunkPage.blur;
+          @Checked = true;
+        }
+      }
+    }
+
+    ColorPicker #ColorPicker {
+      Anchor: (Width: 310, Height: 290, Top: 12);
+      Format: Rgb;
+      Style: $C.@DefaultColorPickerStyle;
+    }
+
+    $C.@TextField #HexColor {
+      PlaceholderText: %server.customUI.tintChunkPage.hexColor;
+    }
+
+    $C.@TextButton #ApplyButton {
+      Text: %server.customUI.tintChunkPage.applyTint;
+    }
+  }
+}
+```
+
+## ChangeModelPage.ui
+
+**Purpose**: Entity model replacement interface
+**Location**: `Pages/ChangeModelPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ModelList` | Group | Available models list |
+| `#SearchInput` | TextField | Model search |
+| `#ApplyButton` | TextButton | Apply model change |
+| `#ResetButton` | SecondaryTextButton | Reset to default |
+
+Interface for changing an entity's visual model at runtime.
+
+## LaunchPadSettingsPage.ui
+
+**Purpose**: Launch pad configuration with velocity and direction
+**Location**: `Pages/LaunchPadSettingsPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ForceX` | NumberField | X-axis launch force |
+| `#ForceY` | NumberField | Y-axis launch force |
+| `#ForceZ` | NumberField | Z-axis launch force |
+| `#AddPlayerVelocity` | CheckBox | Add to existing velocity |
+| `#SaveButton` | TextButton | Save settings |
+
+Settings page for configuring launch pad behavior including launch vector and velocity handling.

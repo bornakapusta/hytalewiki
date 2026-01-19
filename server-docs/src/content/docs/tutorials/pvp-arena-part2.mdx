@@ -1,0 +1,762 @@
+---
+title: "PVP Arena Part 2: Match Flow"
+description: Game loop, countdown, teleportation, and match lifecycle
+---
+
+**Goal:** Implement the complete match lifecycle from lobby to end.
+
+**Prerequisites:** [Part 1: Arena Core](/tutorials/pvp-arena-part1)
+
+**Series:** [Part 1: Arena Core](/tutorials/pvp-arena-part1) | Part 2 of 4 | [Part 3: Combat](/tutorials/pvp-arena-part3) | [Part 4: Commands](/tutorials/pvp-arena-part4)
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **Scheduled tasks** - How to run code after a delay or repeatedly
+- **ScheduledFuture** - Managing and canceling scheduled tasks
+- **Game loops** - Ticking systems that drive gameplay
+- **Task cleanup** - Preventing memory leaks with proper cancellation
+
+---
+
+## Understanding Scheduled Execution
+
+Games need to run code at specific times:
+- "Start the match in 10 seconds"
+- "Check for win conditions every second"
+- "Respawn this player in 5 seconds"
+
+### The Hytale Scheduler
+
+```kotlin
+import com.hypixel.hytale.server.core.HytaleServer
+import java.util.concurrent.TimeUnit
+
+// Run once after 5 seconds
+HytaleServer.SCHEDULED_EXECUTOR.schedule({
+    println("This runs once, 5 seconds from now")
+}, 5, TimeUnit.SECONDS)
+
+// Run every 1 second, starting immediately
+HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+    println("This runs every second")
+}, 0, 1, TimeUnit.SECONDS)
+```
+
+### Why Not Just Use `Thread.sleep()`?
+
+```kotlin
+// BAD: Blocks the thread
+Thread.sleep(5000)  // Server freezes for 5 seconds!
+
+// GOOD: Schedules without blocking
+HytaleServer.SCHEDULED_EXECUTOR.schedule({ ... }, 5, TimeUnit.SECONDS)
+// Code continues immediately, task runs later
+```
+
+**Key insight:** The server has limited threads. Blocking one blocks all events, commands, and player actions on that thread.
+
+---
+
+## Step 1: The Match Controller
+
+Why a separate controller?
+
+```kotlin
+// ArenaManager = STATE (who's playing, what team, is alive)
+// MatchController = FLOW (when to start, when to end, timers)
+
+// Separation of concerns:
+// - ArenaManager answers: "Is player X on team RED?"
+// - MatchController answers: "Should we start the countdown?"
+```
+
+```kotlin
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+
+/**
+ * Controls match flow: countdown, game timer, end conditions.
+ *
+ * WHY STORE ScheduledFuture?
+ * - We need to cancel tasks later
+ * - Without the reference, we can't stop them
+ * - Memory leak if tasks keep running after plugin shutdown
+ */
+class MatchController(
+    private val plugin: JavaPlugin,
+    private val arenaManager: ArenaManager
+) {
+    // References to running tasks (so we can cancel them)
+    private var countdownTask: ScheduledFuture<*>? = null
+    private var gameTickTask: ScheduledFuture<*>? = null
+
+    // Current remaining time in match
+    private var remainingTime: Int = 0
+
+    // Shortcut to config
+    val config get() = arenaManager.config
+}
+```
+
+---
+
+## Step 2: Triggering the Countdown
+
+When should the countdown start?
+
+```kotlin
+    /**
+     * Check if we should start the countdown.
+     *
+     * WHEN TO CALL THIS:
+     * - After a player joins
+     * - After loading saved state
+     *
+     * WHY NOT START IMMEDIATELY ON MIN PLAYERS?
+     * We do! But we check conditions first to be safe.
+     * Calling this multiple times is harmless (idempotent).
+     */
+    fun checkStartConditions() {
+        // Only start from WAITING state
+        if (arenaManager.state != ArenaState.WAITING) return
+
+        // Need minimum players
+        if (arenaManager.getPlayerCount() < config.minPlayers) return
+
+        // All conditions met!
+        startCountdown()
+    }
+
+    /**
+     * Called when a player joins.
+     */
+    fun onPlayerJoin() {
+        checkStartConditions()
+    }
+
+    /**
+     * Called when a player leaves.
+     *
+     * WHY CHECK PLAYER COUNT?
+     * - 2 players, countdown starts
+     * - 1 player leaves during countdown
+     * - Only 1 player left = cancel countdown (unfair to start 1v0)
+     */
+    fun onPlayerLeave() {
+        if (arenaManager.state == ArenaState.COUNTDOWN) {
+            if (arenaManager.getPlayerCount() < config.minPlayers) {
+                cancelCountdown()
+            }
+        }
+    }
+```
+
+---
+
+## Step 3: The Countdown Timer
+
+This is a classic game pattern: show a countdown, then do something.
+
+```kotlin
+    /**
+     * Start the pre-match countdown.
+     *
+     * HOW scheduleAtFixedRate WORKS:
+     * - First execution: immediately (0 delay)
+     * - Then: every 1 second
+     * - Task runs until we cancel it
+     *
+     * WHY NOT scheduleWithFixedDelay?
+     * - scheduleAtFixedRate: "run every 1 second" (clock time)
+     * - scheduleWithFixedDelay: "wait 1 second after each run" (could drift)
+     *
+     * For countdowns, we want consistent timing = scheduleAtFixedRate.
+     */
+    private fun startCountdown() {
+        arenaManager.setState(ArenaState.COUNTDOWN)
+
+        // Capture countdown in local variable
+        // WHY: Lambda captures by reference; we need each execution to see updated value
+        var remaining = config.countdownSeconds
+
+        countdownTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            if (remaining > 0) {
+                // Only broadcast at interesting moments
+                // WHY: Spamming "9... 8... 7..." is annoying
+                // Better: "10... 5... 4... 3... 2... 1..."
+                if (remaining <= 5 || remaining == 10 || remaining % 10 == 0) {
+                    val plural = if (remaining != 1) "s" else ""
+                    arenaManager.broadcast("Match starts in $remaining second$plural...")
+                }
+                remaining--
+            } else {
+                // Countdown finished!
+                // IMPORTANT: Cancel BEFORE starting match
+                // WHY: If startMatch() throws, we don't want countdown still running
+                countdownTask?.cancel(false)
+                startMatch()
+            }
+        }, 0, 1, TimeUnit.SECONDS)
+
+        // Register with TaskRegistry for automatic cleanup on shutdown
+        // WHY: If server shuts down mid-countdown, task is cancelled
+        plugin.taskRegistry.registerTask(countdownTask!!)
+    }
+
+    /**
+     * Cancel the countdown.
+     *
+     * WHY cancel(false) vs cancel(true)?
+     * - cancel(false): Let current execution finish, then stop
+     * - cancel(true): Interrupt current execution immediately
+     *
+     * Usually false is safer - avoids leaving things in inconsistent state.
+     */
+    private fun cancelCountdown() {
+        countdownTask?.cancel(false)
+        countdownTask = null  // Clear reference (helps GC, prevents accidental reuse)
+        arenaManager.setState(ArenaState.WAITING)
+        arenaManager.broadcast("Countdown cancelled - not enough players!")
+    }
+```
+
+### Visualization: The Countdown
+
+```
+Time 0s: [scheduleAtFixedRate starts]
+         "Match starts in 10 seconds..."
+         remaining = 9
+
+Time 1s: remaining = 8 (no message - not interesting)
+
+Time 2s: remaining = 7
+
+...
+
+Time 5s: "Match starts in 5 seconds..."
+         remaining = 4
+
+Time 6s: "4..."
+
+Time 7s: "3..."
+
+Time 8s: "2..."
+
+Time 9s: "1..."
+
+Time 10s: remaining = 0
+          cancel task
+          startMatch()
+```
+
+---
+
+## Step 4: Starting the Match
+
+When countdown ends, we need to:
+1. Teleport players to spawn points
+2. Give them equipment
+3. Start the game timer
+
+```kotlin
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.inventory.ItemStack
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import org.joml.Vector3d
+
+    /**
+     * Start the match.
+     *
+     * ORDER MATTERS:
+     * 1. Change state first (prevents weird edge cases)
+     * 2. Teleport players (they should be at spawns before getting items)
+     * 3. Give loadouts (now they're in position with gear)
+     * 4. Start timer (game is fully set up)
+     */
+    private fun startMatch() {
+        arenaManager.setState(ArenaState.PLAYING)
+        arenaManager.broadcast("=== MATCH STARTED ===")
+
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+
+        // Process each team
+        Team.playingTeams.forEach { team ->
+            val spawn = config.teamSpawns[team] ?: return@forEach
+
+            // Process each player on this team
+            arenaManager.getPlayersOnTeam(team).forEach { uuid ->
+                val playerRef = world.players.values.find { it.uuid == uuid }
+                if (playerRef != null) {
+                    teleportPlayer(playerRef, spawn)
+                    giveLoadout(playerRef)
+                }
+            }
+        }
+
+        startGameTimer()
+    }
+```
+
+### Teleportation
+
+```kotlin
+    /**
+     * Teleport a player to a position.
+     *
+     * WHY TransformComponent?
+     * - Hytale uses ECS (Entity Component System)
+     * - Position is stored in TransformComponent
+     * - teleportPosition() handles network sync automatically
+     *
+     * ALTERNATIVE: setPosition()
+     * - setPosition = smooth movement
+     * - teleportPosition = instant (with effects)
+     */
+    private fun teleportPlayer(playerRef: PlayerRef, position: Vector3d) {
+        val holder = playerRef.holder ?: return
+        val transform = holder.getComponent(TransformComponent.getComponentType())
+        transform?.teleportPosition(position)
+    }
+```
+
+### Giving Equipment
+
+```kotlin
+    /**
+     * Give a player their PVP loadout.
+     *
+     * DESIGN DECISION: Hardcoded vs configurable loadouts
+     * - Hardcoded: Simple, works for this tutorial
+     * - Configurable: Would use a LoadoutConfig class
+     *
+     * WHY clear() FIRST?
+     * - Player might have items from previous match
+     * - Player might have picked up items in lobby
+     * - Start everyone with same equipment = fair
+     *
+     * WHY sendInventory() AT THE END?
+     * - Inventory changes are buffered
+     * - sendInventory() syncs to client
+     * - One sync is more efficient than many
+     */
+    fun giveLoadout(playerRef: PlayerRef) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+        val inventory = player.inventory ?: return
+
+        // Start fresh
+        inventory.clear()
+
+        // Hotbar: sword, bow, food, arrows
+        val hotbar = inventory.hotbar
+        hotbar.setItemStackForSlot(0.toShort(), ItemStack("Weapon_Sword_Iron", 1))
+        hotbar.setItemStackForSlot(1.toShort(), ItemStack("Weapon_Bow", 1))
+        hotbar.setItemStackForSlot(2.toShort(), ItemStack("Food_Apple", 16))
+        hotbar.setItemStackForSlot(8.toShort(), ItemStack("Arrow", 32))  // Slot 8 = last hotbar slot
+
+        // Full iron armor
+        val armor = inventory.armor
+        armor.setItemStackForSlot(0.toShort(), ItemStack("Armor_Helmet_Iron", 1))
+        armor.setItemStackForSlot(1.toShort(), ItemStack("Armor_Chestplate_Iron", 1))
+        armor.setItemStackForSlot(2.toShort(), ItemStack("Armor_Leggings_Iron", 1))
+        armor.setItemStackForSlot(3.toShort(), ItemStack("Armor_Boots_Iron", 1))
+
+        // Sync to client
+        player.sendInventory()
+    }
+```
+
+---
+
+## Step 5: The Game Timer
+
+The game loop runs every second during the match:
+
+```kotlin
+    /**
+     * Start the game timer.
+     *
+     * WHY A GAME LOOP?
+     * - Need to track time remaining
+     * - Need to broadcast warnings
+     * - Could also: process combat, update scoreboards, etc.
+     *
+     * WHY START AT 1 SECOND DELAY?
+     * - Countdown just ended
+     * - Give players a moment before timer shows
+     */
+    private fun startGameTimer() {
+        remainingTime = config.roundDurationSeconds
+
+        gameTickTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            if (remainingTime > 0) {
+                gameTick()
+                remainingTime--
+            } else {
+                endMatch(EndReason.TIME_EXPIRED)
+            }
+        }, 1, 1, TimeUnit.SECONDS)
+
+        plugin.taskRegistry.registerTask(gameTickTask!!)
+    }
+
+    /**
+     * Called every second during the match.
+     *
+     * WHAT GOES IN gameTick()?
+     * - Time warnings
+     * - Score updates
+     * - Zone shrinking (battle royale)
+     * - Objective spawning
+     * - Anything that happens on a schedule
+     *
+     * WHY when() INSTEAD OF if/else?
+     * - Cleaner when checking multiple specific values
+     * - Compiler can optimize jump tables
+     */
+    private fun gameTick() {
+        when (remainingTime) {
+            60 -> arenaManager.broadcast("60 seconds remaining!")
+            30 -> arenaManager.broadcast("30 seconds remaining!")
+            10 -> arenaManager.broadcast("10 seconds remaining!")
+            5, 4, 3, 2, 1 -> arenaManager.broadcast("$remainingTime...")
+        }
+    }
+```
+
+---
+
+## Step 6: End Conditions
+
+How can a match end?
+
+```kotlin
+/**
+ * Reasons for match ending.
+ *
+ * WHY AN ENUM?
+ * - Type-safe (can't misspell "elimnation")
+ * - Exhaustive when() - compiler warns if you miss a case
+ * - Self-documenting
+ *
+ * WHY TRACK THE REASON?
+ * - Different end screens ("Team eliminated!" vs "Time's up!")
+ * - Analytics (how often do matches go to time?)
+ * - Achievements (win by elimination)
+ */
+enum class EndReason {
+    TEAM_ELIMINATED,  // All enemies dead
+    TIME_EXPIRED,     // Clock ran out
+    FORCED            // Admin used /arena end
+}
+```
+
+### Checking Win Conditions
+
+```kotlin
+    /**
+     * Check if someone has won.
+     *
+     * Returns winning team, or null if game continues.
+     *
+     * WHEN TO CALL:
+     * - After a player dies
+     * - After a player disconnects
+     * - NOT every tick (wasteful, death/disconnect covers it)
+     */
+    fun checkWinCondition(): Team? {
+        // Only check during active match
+        if (arenaManager.state != ArenaState.PLAYING) return null
+
+        // Find teams with alive players
+        val teamsWithPlayers = Team.playingTeams.filter { team ->
+            arenaManager.getAliveCount(team) > 0
+        }
+
+        return when (teamsWithPlayers.size) {
+            1 -> teamsWithPlayers.first()  // One team left = winner
+            0 -> null                       // Everyone dead = draw (rare)
+            else -> null                    // Multiple teams = game continues
+        }
+    }
+
+    /**
+     * Called when a player is eliminated (death or disconnect).
+     */
+    fun onPlayerEliminated(uuid: java.util.UUID) {
+        val winner = checkWinCondition()
+        if (winner != null) {
+            endMatch(EndReason.TEAM_ELIMINATED, winner)
+        }
+    }
+```
+
+---
+
+## Step 7: Ending the Match
+
+```kotlin
+    /**
+     * End the match.
+     *
+     * WHY CHECK STATE FIRST?
+     * - Prevents ending twice (race condition)
+     * - endMatch called from timer AND elimination check
+     * - First one wins, second is ignored
+     */
+    fun endMatch(reason: EndReason, winningTeam: Team? = null) {
+        // Guard: Only end if currently playing
+        if (arenaManager.state != ArenaState.PLAYING) return
+
+        // 1. Change state immediately
+        arenaManager.setState(ArenaState.ENDED)
+
+        // 2. Stop the game timer
+        gameTickTask?.cancel(false)
+        gameTickTask = null
+
+        // 3. Determine winner (if not provided)
+        val winner = winningTeam ?: determineWinner()
+
+        // 4. Announce results
+        arenaManager.broadcast("=== MATCH ENDED ===")
+        when (reason) {
+            EndReason.TEAM_ELIMINATED -> {
+                arenaManager.broadcast("${winner?.displayName ?: "No one"} wins by elimination!")
+            }
+            EndReason.TIME_EXPIRED -> {
+                arenaManager.broadcast("Time's up! ${winner?.displayName ?: "Draw"} wins!")
+            }
+            EndReason.FORCED -> {
+                arenaManager.broadcast("Match ended by admin")
+            }
+        }
+
+        // 5. Schedule reset (give players time to see results)
+        HytaleServer.SCHEDULED_EXECUTOR.schedule({
+            resetArena()
+        }, 10, TimeUnit.SECONDS)
+    }
+
+    /**
+     * Determine winner by most alive players.
+     *
+     * Used when time expires (no elimination).
+     */
+    private fun determineWinner(): Team? {
+        return Team.playingTeams.maxByOrNull { arenaManager.getAliveCount(it) }
+    }
+```
+
+---
+
+## Step 8: Resetting for Next Match
+
+```kotlin
+    /**
+     * Reset the arena for the next match.
+     *
+     * WHAT NEEDS RESETTING:
+     * 1. Player positions → lobby
+     * 2. Player inventories → empty
+     * 3. Arena state → WAITING
+     *
+     * WHY NOT RESET IMMEDIATELY?
+     * - Players need time to see results
+     * - Celebrate/commiserate with teammates
+     * - 10 second delay feels good
+     */
+    private fun resetArena() {
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+
+        // Teleport everyone back to lobby
+        arenaManager.getPlayers().forEach { uuid ->
+            val playerRef = world.players.values.find { it.uuid == uuid }
+            if (playerRef != null) {
+                teleportPlayer(playerRef, config.lobbySpawn)
+                clearInventory(playerRef)
+            }
+        }
+
+        // Reset arena state
+        arenaManager.reset()
+
+        arenaManager.broadcast("Arena reset! Ready for next match.")
+    }
+
+    /**
+     * Clear a player's inventory.
+     */
+    private fun clearInventory(playerRef: PlayerRef) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+        val inventory = player.inventory ?: return
+        inventory.clear()
+        player.sendInventory()  // Sync to client
+    }
+
+    /**
+     * Force end the match (admin command).
+     */
+    fun forceEnd() {
+        endMatch(EndReason.FORCED)
+    }
+
+    /**
+     * Force start the countdown (admin command).
+     */
+    fun forceStart() {
+        if (arenaManager.state == ArenaState.WAITING) {
+            startCountdown()
+        }
+    }
+```
+
+---
+
+## Step 9: Wiring It Together
+
+Update the plugin to use the MatchController:
+
+```kotlin
+class ArenaPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    lateinit var arenaManager: ArenaManager
+        private set
+    lateinit var matchController: MatchController
+        private set
+
+    override fun setup() {
+        val config = ArenaConfig(
+            name = "Battle Arena",
+            minPlayers = 2,
+            maxPlayers = 10,
+            countdownSeconds = 10,
+            roundDurationSeconds = 300
+        )
+
+        // Create managers in order (MatchController needs ArenaManager)
+        arenaManager = ArenaManager(this, config)
+        matchController = MatchController(this, arenaManager)
+
+        registerEvents()
+    }
+
+    private fun registerEvents() {
+        eventRegistry.register(PlayerReadyEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+
+            // 1. Add to arena (handles team assignment)
+            arenaManager.addPlayer(playerRef)
+
+            // 2. Check if we should start countdown
+            matchController.onPlayerJoin()
+        }
+
+        eventRegistry.register(PlayerDisconnectEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+
+            // 1. Remove from arena
+            arenaManager.removePlayer(playerRef.uuid)
+
+            // 2. Check if we should cancel countdown
+            matchController.onPlayerLeave()
+        }
+    }
+
+    override fun start() {
+        logger.atInfo().log("ArenaPlugin started")
+    }
+
+    override fun shutdown() {
+        logger.atInfo().log("ArenaPlugin shutdown")
+        // Note: Tasks registered with taskRegistry are auto-cancelled
+    }
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. Forgetting to Cancel Tasks
+
+```kotlin
+// BAD: Task keeps running forever
+fun startTimer() {
+    HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({ ... }, 0, 1, TimeUnit.SECONDS)
+    // No reference saved = can't cancel later!
+}
+
+// GOOD: Save reference and cancel when done
+private var task: ScheduledFuture<*>? = null
+
+fun startTimer() {
+    task = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({ ... }, 0, 1, TimeUnit.SECONDS)
+}
+
+fun stopTimer() {
+    task?.cancel(false)
+    task = null
+}
+```
+
+### 2. Not Checking State
+
+```kotlin
+// BAD: Can end match multiple times
+fun endMatch() {
+    announceWinner()  // Could announce twice!
+    resetArena()
+}
+
+// GOOD: Guard against duplicate calls
+fun endMatch() {
+    if (state != ArenaState.PLAYING) return
+    state = ArenaState.ENDED
+    announceWinner()
+    resetArena()
+}
+```
+
+### 3. Forgetting sendInventory()
+
+```kotlin
+// BAD: Client doesn't see changes
+inventory.hotbar.setItemStackForSlot(0, sword)
+// Player still sees old items!
+
+// GOOD: Sync to client
+inventory.hotbar.setItemStackForSlot(0, sword)
+player.sendInventory()
+```
+
+---
+
+## Summary
+
+In this part, you learned:
+
+| Concept | Why It Matters |
+|---------|---------------|
+| ScheduledFuture | References let you cancel tasks |
+| scheduleAtFixedRate | Consistent timing for countdowns |
+| Task registration | Automatic cleanup on shutdown |
+| State guards | Prevent duplicate actions |
+| sendInventory() | Sync changes to client |
+
+---
+
+## What's Next
+
+In [Part 3: Combat & Scoring](/tutorials/pvp-arena-part3), we'll add:
+- Player stats component (kills, deaths, damage)
+- Death detection and killer attribution
+- Elimination, respawn, and spectator modes
+- Kill feed broadcasts
+
+You'll learn about **ECS components** and **death handling**.

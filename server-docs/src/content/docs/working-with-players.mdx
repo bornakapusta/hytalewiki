@@ -1,0 +1,325 @@
+---
+title: Working with Players
+description: Get player data, manage inventory, send messages, teleport
+---
+
+**Goal:** Build a plugin that gives items, sends messages, and teleports players.
+
+**Prerequisites:** [Handling Events](/handling-events)
+
+## Step 1: Get a Player Reference
+
+From events:
+
+```kotlin
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    val holder = event.holder
+
+    // Get Player component
+    val player = holder.getComponent(Player.getComponentType())
+}
+```
+
+From world:
+
+```kotlin
+val world = Universe.get().worlds["default"]
+val playerRefs = world?.players?.values
+
+playerRefs?.forEach { playerRef ->
+    val player = playerRef.holder?.getComponent(Player.getComponentType())
+    // Use player
+}
+```
+
+## Step 2: Send Messages
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+
+// Simple text
+player.sendMessage(Message.raw("Hello, player!"))
+
+// Multiple lines
+player.sendMessage(Message.raw("Welcome to the server!"))
+player.sendMessage(Message.raw("Type /help for commands"))
+
+// Translatable (if supported)
+player.sendMessage(Message.translation("server.welcome.message")
+    .param("player", playerRef.username))
+```
+
+## Step 3: Teleport Players
+
+Access the transform component:
+
+```kotlin
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+import org.joml.Vector3d
+
+fun teleportPlayer(playerRef: PlayerRef, position: Vector3d) {
+    val holder = playerRef.holder ?: return
+    val transform = holder.getComponent(TransformComponent.getComponentType())
+
+    transform?.teleportPosition(position)
+}
+
+// Usage
+teleportPlayer(playerRef, Vector3d(0.0, 100.0, 0.0))
+```
+
+Teleport to another player:
+
+```kotlin
+fun teleportToPlayer(player: PlayerRef, target: PlayerRef) {
+    val targetHolder = target.holder ?: return
+    val targetTransform = targetHolder.getComponent(TransformComponent.getComponentType())
+    val targetPos = targetTransform?.position ?: return
+
+    teleportPlayer(player, targetPos)
+}
+```
+
+## Step 4: Access Inventory
+
+```kotlin
+import com.hypixel.hytale.server.core.inventory.ItemStack
+
+fun getInventory(playerRef: PlayerRef) {
+    val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+    val inventory = player.inventory ?: return
+
+    // Inventory sections
+    val hotbar = inventory.hotbar        // 9 slots
+    val storage = inventory.storage      // 36 slots
+    val armor = inventory.armor          // 4+ slots
+    val utility = inventory.utility      // 4 slots
+}
+```
+
+## Step 5: Give Items
+
+```kotlin
+fun giveItem(playerRef: PlayerRef, itemId: String, amount: Int) {
+    val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+    val inventory = player.inventory ?: return
+
+    val item = ItemStack(itemId, amount)
+    inventory.hotbar.addItemStack(item)
+
+    // Sync to client
+    player.sendInventory()
+}
+
+// Usage
+giveItem(playerRef, "Tool_Pickaxe_Iron", 1)
+giveItem(playerRef, "Food_Apple", 16)
+```
+
+## Step 6: Give a Full Kit
+
+```kotlin
+fun giveStarterKit(playerRef: PlayerRef) {
+    val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+    val inventory = player.inventory ?: return
+
+    // Clear first (optional)
+    inventory.clear()
+
+    // Hotbar
+    val hotbar = inventory.hotbar
+    hotbar.setItemStackForSlot(0.toShort(), ItemStack("Weapon_Sword_Iron", 1))
+    hotbar.setItemStackForSlot(1.toShort(), ItemStack("Tool_Pickaxe_Iron", 1))
+    hotbar.setItemStackForSlot(2.toShort(), ItemStack("Tool_Axe_Iron", 1))
+    hotbar.setItemStackForSlot(3.toShort(), ItemStack("Food_Apple", 16))
+
+    // Storage
+    val storage = inventory.storage
+    storage.addItemStack(ItemStack("Wood_Planks", 64))
+    storage.addItemStack(ItemStack("Rock_Cobblestone", 64))
+
+    // Armor
+    val armor = inventory.armor
+    armor.setItemStackForSlot(0.toShort(), ItemStack("Armor_Helmet_Iron", 1))
+    armor.setItemStackForSlot(1.toShort(), ItemStack("Armor_Chestplate_Iron", 1))
+    armor.setItemStackForSlot(2.toShort(), ItemStack("Armor_Leggings_Iron", 1))
+    armor.setItemStackForSlot(3.toShort(), ItemStack("Armor_Boots_Iron", 1))
+
+    // Sync to client
+    player.sendInventory()
+}
+```
+
+## Step 7: Check and Consume Resources
+
+```kotlin
+fun canAfford(playerRef: PlayerRef, costs: List<ItemStack>): Boolean {
+    val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return false
+    val inventory = player.inventory ?: return false
+
+    return inventory.getCombinedEverything().canRemoveItemStacks(costs)
+}
+
+fun consumeResources(playerRef: PlayerRef, costs: List<ItemStack>): Boolean {
+    val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return false
+    val inventory = player.inventory ?: return false
+
+    val combined = inventory.getCombinedEverything()
+    if (!combined.canRemoveItemStacks(costs)) {
+        return false
+    }
+
+    val transaction = combined.removeItemStacks(costs, allOrNothing = true, filter = true)
+    if (transaction.succeeded()) {
+        player.sendInventory()
+        return true
+    }
+    return false
+}
+
+// Usage
+val cost = listOf(
+    ItemStack("Wood_Planks", 20),
+    ItemStack("Rock_Iron_Ingot", 5)
+)
+
+if (canAfford(playerRef, cost)) {
+    if (consumeResources(playerRef, cost)) {
+        player.sendMessage(Message.raw("Built successfully!"))
+    }
+} else {
+    player.sendMessage(Message.raw("Not enough resources!"))
+}
+```
+
+## Step 8: Modify Movement
+
+```kotlin
+import com.hypixel.hytale.server.core.entity.entities.player.movement.MovementManager
+
+fun enableFlight(playerRef: PlayerRef) {
+    val holder = playerRef.holder ?: return
+    val movement = holder.getComponent(MovementManager.getComponentType()) ?: return
+
+    movement.settings.canFly = true
+    movement.update(playerRef.packetHandler)
+}
+
+fun setSpeed(playerRef: PlayerRef, speed: Float) {
+    val holder = playerRef.holder ?: return
+    val movement = holder.getComponent(MovementManager.getComponentType()) ?: return
+
+    movement.settings.baseSpeed = speed
+    movement.update(playerRef.packetHandler)
+}
+```
+
+## Complete Example
+
+A player management plugin:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+import com.hypixel.hytale.server.core.inventory.ItemStack
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import org.joml.Vector3d
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+class PlayerPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    // Track spawn point per player
+    private val playerSpawns = ConcurrentHashMap<UUID, Vector3d>()
+
+    override fun setup() {
+        eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            val uuid = playerRef.uuid
+
+            // Initialize spawn
+            playerSpawns.putIfAbsent(uuid, Vector3d(0.0, 100.0, 0.0))
+
+            // Delayed welcome (player needs to load)
+            HytaleServer.SCHEDULED_EXECUTOR.schedule({
+                welcomePlayer(playerRef)
+            }, 3, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun welcomePlayer(playerRef: PlayerRef) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+
+        // Send welcome
+        player.sendMessage(Message.raw("Welcome, ${playerRef.username}!"))
+        player.sendMessage(Message.raw("Type /kit to get started"))
+
+        // Give starter items
+        giveStarterItems(playerRef)
+
+        // Teleport to spawn
+        val spawn = playerSpawns[playerRef.uuid] ?: return
+        teleportPlayer(playerRef, spawn)
+    }
+
+    private fun giveStarterItems(playerRef: PlayerRef) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType()) ?: return
+        val hotbar = player.inventory?.hotbar ?: return
+
+        hotbar.setItemStackForSlot(0.toShort(), ItemStack("Weapon_Sword_Iron", 1))
+        hotbar.setItemStackForSlot(1.toShort(), ItemStack("Food_Apple", 8))
+
+        player.sendInventory()
+    }
+
+    private fun teleportPlayer(playerRef: PlayerRef, pos: Vector3d) {
+        val holder = playerRef.holder ?: return
+        val transform = holder.getComponent(TransformComponent.getComponentType())
+        transform?.teleportPosition(pos)
+    }
+
+    override fun start() {
+        logger.atInfo().log("PlayerPlugin started")
+    }
+
+    override fun shutdown() {
+        logger.atInfo().log("PlayerPlugin shutdown")
+    }
+}
+```
+
+## ItemStack Reference
+
+```kotlin
+// Create items
+val item = ItemStack("Tool_Pickaxe_Iron")        // 1 item
+val stack = ItemStack("Wood_Planks", 64)          // Stack of 64
+val damaged = ItemStack("Tool_Axe_Iron", 1, 50.0, 100.0, null)  // With durability
+
+// Check state
+item.isEmpty()           // Is empty/null
+item.isBroken()          // Durability = 0
+item.isUnbreakable()     // maxDurability <= 0
+
+// Modify (returns new instance - immutable)
+val more = item.withQuantity(5)
+val repaired = item.withDurability(100.0)
+```
+
+## Next Steps
+
+- [Spawning Entities](/spawning-entities) - Spawn mobs and items
+- [Creating Commands](/creating-commands) - Player commands
+- [Scheduling Tasks](/scheduling-tasks) - Delayed actions

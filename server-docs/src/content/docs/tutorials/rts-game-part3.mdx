@@ -1,0 +1,853 @@
+---
+title: "RTS Game Part 3: Unit System"
+description: Spawn and manage combat units with food upkeep
+---
+
+**Goal:** Create controllable units that can be trained from buildings.
+
+**Prerequisites:** [Part 2: Building System](/tutorials/rts-game-part2), [Spawning Entities](/spawning-entities)
+
+**Series:** [Part 1: Resources](/tutorials/rts-game-part1) | [Part 2: Buildings](/tutorials/rts-game-part2) | Part 3 of 4 | [Part 4: Combat](/tutorials/rts-game-part4)
+
+---
+
+## What We're Building
+
+A unit system where:
+- Players train units from military buildings
+- Units cost resources and consume food (upkeep)
+- Each unit type has different stats (damage, health, speed)
+- Units can be commanded to move and attack
+
+## Understanding Units in RTS
+
+Units in RTS games are typically implemented as:
+
+```
+Option A: Pure ECS (Components on entities)
++ Native to the engine
++ Good performance
+- Complex state management
+
+Option B: Manager + Entity reference
++ Clear ownership and state
++ Easier debugging
+- Extra bookkeeping
+
+We'll use Option B: UnitManager tracks Unit objects
+that reference spawned entities.
+```
+
+---
+
+## Step 1: Define Unit Types
+
+```kotlin
+/**
+ * All unit types in the game.
+ *
+ * Design notes:
+ * - PEASANT is the only unit without building requirement
+ * - Combat units have rock-paper-scissors balance:
+ *   - Warriors beat Archers (close range)
+ *   - Archers beat Knights (kiting)
+ *   - Knights beat Warriors (armor)
+ */
+enum class UnitType(
+    val displayName: String,
+    val costs: Map<Resource, Int>,
+    val trainTimeSeconds: Int,
+    val maxHealth: Int,
+    val damage: Int,
+    val attackRange: Double,
+    val moveSpeed: Float,
+    val foodUpkeep: Int,  // Food consumed per minute
+    val description: String
+) {
+    PEASANT(
+        displayName = "Peasant",
+        costs = mapOf(Resource.FOOD to 20),
+        trainTimeSeconds = 10,
+        maxHealth = 50,
+        damage = 5,
+        attackRange = 1.5,
+        moveSpeed = 1.0f,
+        foodUpkeep = 1,
+        description = "Basic worker, gathers resources"
+    ),
+
+    WARRIOR(
+        displayName = "Warrior",
+        costs = mapOf(Resource.FOOD to 30, Resource.GOLD to 10),
+        trainTimeSeconds = 20,
+        maxHealth = 100,
+        damage = 15,
+        attackRange = 2.0,
+        moveSpeed = 0.9f,
+        foodUpkeep = 2,
+        description = "Melee infantry with sword and shield"
+    ),
+
+    ARCHER(
+        displayName = "Archer",
+        costs = mapOf(Resource.FOOD to 25, Resource.WOOD to 20, Resource.GOLD to 15),
+        trainTimeSeconds = 25,
+        maxHealth = 60,
+        damage = 12,
+        attackRange = 15.0,  // Long range!
+        moveSpeed = 1.1f,
+        foodUpkeep = 2,
+        description = "Ranged unit, weak in melee"
+    ),
+
+    KNIGHT(
+        displayName = "Knight",
+        costs = mapOf(Resource.FOOD to 50, Resource.IRON to 30, Resource.GOLD to 40),
+        trainTimeSeconds = 40,
+        maxHealth = 200,
+        damage = 25,
+        attackRange = 2.5,
+        moveSpeed = 1.2f,  // Mounted = fast
+        foodUpkeep = 4,
+        description = "Heavy cavalry, expensive but powerful"
+    ),
+
+    CROSSBOWMAN(
+        displayName = "Crossbowman",
+        costs = mapOf(Resource.FOOD to 35, Resource.WOOD to 15, Resource.IRON to 20, Resource.GOLD to 25),
+        trainTimeSeconds = 30,
+        maxHealth = 70,
+        damage = 18,
+        attackRange = 12.0,
+        moveSpeed = 0.9f,
+        foodUpkeep = 3,
+        description = "Armored ranged unit, slower than archer"
+    );
+
+    /**
+     * Which building is required to train this unit?
+     */
+    fun getRequiredBuilding(): BuildingType? {
+        return when (this) {
+            PEASANT -> null  // No building required
+            WARRIOR, KNIGHT -> BuildingType.BARRACKS
+            ARCHER, CROSSBOWMAN -> BuildingType.ARCHERY_RANGE
+        }
+    }
+
+    fun formatCosts(): String {
+        return costs.entries.joinToString(", ") { (res, amt) ->
+            "$amt ${res.displayName}"
+        }
+    }
+}
+```
+
+---
+
+## Step 2: Unit Instance
+
+Track individual unit state:
+
+```kotlin
+import org.joml.Vector3d
+import java.util.UUID
+
+/**
+ * A single unit instance.
+ *
+ * entityRef: Reference to the spawned entity in the world
+ * This links our game logic to the actual visible entity.
+ */
+data class Unit(
+    val id: UUID = UUID.randomUUID(),
+    val type: UnitType,
+    val team: Team,
+    var health: Int = type.maxHealth,
+
+    // Entity tracking
+    var entityRef: hytale.ecs.Ref<*>? = null,
+
+    // State
+    var state: UnitState = UnitState.IDLE,
+
+    // Commands
+    var targetPosition: Vector3d? = null,
+    var targetUnit: UUID? = null,  // For attack commands
+    var targetBuilding: UUID? = null
+) {
+    val isAlive: Boolean
+        get() = health > 0
+
+    val healthPercent: Double
+        get() = health.toDouble() / type.maxHealth
+
+    fun takeDamage(amount: Int): Boolean {
+        health = (health - amount).coerceAtLeast(0)
+        return health == 0  // Returns true if unit died
+    }
+
+    fun heal(amount: Int) {
+        health = (health + amount).coerceAtMost(type.maxHealth)
+    }
+}
+
+enum class UnitState {
+    IDLE,       // Standing around
+    MOVING,     // Walking to target position
+    ATTACKING,  // Engaging enemy
+    GATHERING,  // Peasant gathering resources
+    DEAD        // Awaiting cleanup
+}
+```
+
+---
+
+## Step 3: Training Queue
+
+Buildings need a queue for training units:
+
+```kotlin
+/**
+ * Represents a unit being trained.
+ */
+data class TrainingSlot(
+    val unitType: UnitType,
+    var progressSeconds: Int = 0
+) {
+    val isComplete: Boolean
+        get() = progressSeconds >= unitType.trainTimeSeconds
+
+    val progressPercent: Double
+        get() = progressSeconds.toDouble() / unitType.trainTimeSeconds
+}
+
+// Add to Building class:
+data class Building(
+    // ... existing fields ...
+
+    // Training queue (only for military buildings)
+    val trainingQueue: MutableList<TrainingSlot> = mutableListOf()
+) {
+    /**
+     * Maximum units that can be queued.
+     */
+    val maxQueueSize = 5
+
+    /**
+     * Can this building train units?
+     */
+    val canTrain: Boolean
+        get() = type in listOf(
+            BuildingType.BARRACKS,
+            BuildingType.ARCHERY_RANGE
+        ) && isComplete
+
+    /**
+     * Add a unit to the training queue.
+     */
+    fun queueUnit(unitType: UnitType): Boolean {
+        if (!canTrain) return false
+        if (trainingQueue.size >= maxQueueSize) return false
+
+        trainingQueue.add(TrainingSlot(unitType))
+        return true
+    }
+
+    /**
+     * Tick training progress.
+     * Returns completed unit type if one finished, null otherwise.
+     */
+    fun tickTraining(): UnitType? {
+        if (!canTrain || trainingQueue.isEmpty()) return null
+
+        val current = trainingQueue.first()
+        current.progressSeconds++
+
+        if (current.isComplete) {
+            trainingQueue.removeAt(0)
+            return current.unitType
+        }
+        return null
+    }
+}
+```
+
+---
+
+## Step 4: Unit Manager
+
+Central unit management:
+
+```kotlin
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.universe.Universe
+import org.joml.Vector3d
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+class UnitManager(
+    private val plugin: JavaPlugin,
+    private val resourceManager: ResourceManager,
+    private val teamManager: TeamManager,
+    private val buildingManager: BuildingManager,
+    private val buildingEffects: BuildingEffects
+) {
+    // All units in the game
+    private val units = ConcurrentHashMap<UUID, Unit>()
+
+    // Per-team unit counts (for quick lookups)
+    private val teamUnitCounts = ConcurrentHashMap<Team, Int>()
+
+    // Configuration
+    val maxUnitsPerTeam = 50
+
+    init {
+        Team.playableTeams.forEach { teamUnitCounts[it] = 0 }
+    }
+
+    /**
+     * Try to queue a unit for training at a building.
+     *
+     * This is a multi-step process:
+     * 1. Validate player can train this unit
+     * 2. Check resource costs
+     * 3. Add to building's training queue
+     */
+    fun tryQueueUnit(
+        playerUuid: UUID,
+        unitType: UnitType,
+        building: Building
+    ): QueueResult {
+        val team = teamManager.getTeam(playerUuid)
+        if (team == Team.NONE) {
+            return QueueResult.NOT_ON_TEAM
+        }
+
+        // Check building ownership
+        if (building.team != team) {
+            return QueueResult.NOT_YOUR_BUILDING
+        }
+
+        // Check building can train this unit
+        if (!building.canTrain) {
+            return QueueResult.BUILDING_CANNOT_TRAIN
+        }
+
+        // Check building type matches unit requirement
+        val requiredBuilding = unitType.getRequiredBuilding()
+        if (requiredBuilding != null && building.type != requiredBuilding) {
+            return QueueResult.WRONG_BUILDING_TYPE
+        }
+
+        // Check unit cap
+        if ((teamUnitCounts[team] ?: 0) >= maxUnitsPerTeam) {
+            return QueueResult.UNIT_CAP_REACHED
+        }
+
+        // Check resources
+        if (!resourceManager.trySpendMultiple(team, unitType.costs)) {
+            return QueueResult.INSUFFICIENT_RESOURCES
+        }
+
+        // Add to queue
+        if (!building.queueUnit(unitType)) {
+            // Refund resources since queue is full
+            unitType.costs.forEach { (resource, amount) ->
+                resourceManager.addResource(team, resource, amount)
+            }
+            return QueueResult.QUEUE_FULL
+        }
+
+        return QueueResult.SUCCESS
+    }
+
+    /**
+     * Spawn a unit into the world.
+     *
+     * Called when training completes.
+     */
+    fun spawnUnit(unitType: UnitType, team: Team, position: Vector3d): Unit {
+        val unit = Unit(
+            type = unitType,
+            team = team
+        )
+
+        // Spawn entity in world
+        val world = plugin.universeService.universe?.worlds?.get("default")
+        if (world != null) {
+            // Create entity holder with components
+            // This is simplified - actual spawning uses entity registry
+            /*
+            val holder = entityRegistry.newHolder()
+            holder.addComponent(TransformComponent.getComponentType(),
+                TransformComponent(position))
+            holder.addComponent(ModelComponent.getComponentType(),
+                ModelComponent(unitType.modelId))
+            // Add custom UnitComponent for tracking
+            val ref = world.entityStore.store.addEntity(holder, AddReason.SPAWN)
+            unit.entityRef = ref
+            */
+        }
+
+        // Register unit
+        units[unit.id] = unit
+        teamUnitCounts.merge(team, 1, Int::plus)
+
+        plugin.logger.atInfo().log("Unit spawned: ${unitType.displayName} for $team")
+        return unit
+    }
+
+    /**
+     * Remove a unit (death or despawn).
+     */
+    fun removeUnit(unitId: UUID) {
+        val unit = units.remove(unitId) ?: return
+
+        // Decrement team count
+        teamUnitCounts.merge(unit.team, -1, Int::plus)
+
+        // Remove entity from world
+        unit.entityRef?.let { ref ->
+            // world.entityStore.store.removeEntity(ref, RemoveReason.DEATH)
+        }
+
+        plugin.logger.atInfo().log("Unit removed: ${unit.type.displayName}")
+    }
+
+    /**
+     * Get all units for a team.
+     */
+    fun getTeamUnits(team: Team): List<Unit> {
+        return units.values.filter { it.team == team && it.isAlive }
+    }
+
+    /**
+     * Get unit count for a team.
+     */
+    fun getTeamUnitCount(team: Team): Int {
+        return teamUnitCounts[team] ?: 0
+    }
+
+    /**
+     * Get unit by ID.
+     */
+    fun getUnit(unitId: UUID): Unit? = units[unitId]
+
+    /**
+     * Get unit at position (for targeting).
+     */
+    fun getUnitAt(position: Vector3d, radius: Double = 2.0): Unit? {
+        // Would need to check entity positions
+        // Simplified: iterate and check
+        return units.values.find { unit ->
+            // Get position from entity transform
+            // val unitPos = getUnitPosition(unit)
+            // unitPos?.distance(position) ?: Double.MAX_VALUE <= radius
+            false  // Placeholder
+        }
+    }
+
+    /**
+     * Calculate total food upkeep for a team.
+     */
+    fun getTotalFoodUpkeep(team: Team): Int {
+        return getTeamUnits(team).sumOf { it.type.foodUpkeep }
+    }
+
+    /**
+     * Called every game tick.
+     */
+    fun tick() {
+        // Process training queues
+        tickTraining()
+
+        // Process unit AI/commands
+        tickUnits()
+    }
+
+    /**
+     * Process all building training queues.
+     */
+    private fun tickTraining() {
+        for (building in buildingManager.getAllBuildings()) {
+            val completedType = building.tickTraining()
+            if (completedType != null) {
+                // Spawn the unit near the building
+                val spawnPos = Vector3d(
+                    building.position.x + 3,  // Offset from building
+                    building.position.y,
+                    building.position.z
+                )
+                spawnUnit(completedType, building.team, spawnPos)
+            }
+        }
+    }
+
+    /**
+     * Process unit AI and commands.
+     */
+    private fun tickUnits() {
+        for (unit in units.values) {
+            if (!unit.isAlive) continue
+
+            when (unit.state) {
+                UnitState.MOVING -> tickUnitMovement(unit)
+                UnitState.ATTACKING -> tickUnitAttack(unit)
+                UnitState.GATHERING -> tickUnitGathering(unit)
+                else -> { /* IDLE - do nothing */ }
+            }
+        }
+    }
+
+    private fun tickUnitMovement(unit: Unit) {
+        // Move toward targetPosition
+        // When arrived: state = IDLE
+    }
+
+    private fun tickUnitAttack(unit: Unit) {
+        // Check if target still valid
+        // If in range: deal damage
+        // If not in range: move closer
+    }
+
+    private fun tickUnitGathering(unit: Unit) {
+        // Peasant-only: gather from nearby resource
+    }
+}
+
+enum class QueueResult {
+    SUCCESS,
+    NOT_ON_TEAM,
+    NOT_YOUR_BUILDING,
+    BUILDING_CANNOT_TRAIN,
+    WRONG_BUILDING_TYPE,
+    UNIT_CAP_REACHED,
+    INSUFFICIENT_RESOURCES,
+    QUEUE_FULL
+}
+```
+
+---
+
+## Step 5: Food Upkeep System
+
+Units consume food over time:
+
+```kotlin
+// In GameManager, add to tick():
+
+private fun tick() {
+    tickCount++
+
+    buildingManager.tick()
+    unitManager.tick()
+
+    // Gold income every 10 seconds
+    if (tickCount % 10 == 0) {
+        distributePassiveIncome()
+    }
+
+    // Farm food income every 60 seconds
+    if (tickCount % 60 == 0) {
+        distributeFarmIncome()
+    }
+
+    // Food upkeep every 60 seconds
+    if (tickCount % 60 == 0) {
+        consumeFoodUpkeep()
+    }
+}
+
+/**
+ * Consume food for unit upkeep.
+ *
+ * If a team can't pay upkeep, units start taking attrition damage.
+ */
+private fun consumeFoodUpkeep() {
+    Team.playableTeams.forEach { team ->
+        val upkeep = unitManager.getTotalFoodUpkeep(team)
+        val currentFood = resourceManager.getResource(team, Resource.FOOD)
+
+        if (currentFood >= upkeep) {
+            // Can afford upkeep
+            resourceManager.trySpend(team, Resource.FOOD, upkeep)
+        } else {
+            // Starvation! Units take damage
+            resourceManager.trySpend(team, Resource.FOOD, currentFood)  // Spend what we have
+
+            val deficit = upkeep - currentFood
+            applyStarvationDamage(team, deficit)
+        }
+    }
+}
+
+/**
+ * When a team can't afford food upkeep, their units starve.
+ *
+ * Damage is proportional to the deficit.
+ */
+private fun applyStarvationDamage(team: Team, deficit: Int) {
+    val units = unitManager.getTeamUnits(team)
+    if (units.isEmpty()) return
+
+    // 5 damage per food deficit, spread across units
+    val totalDamage = deficit * 5
+    val damagePerUnit = totalDamage / units.size
+
+    units.forEach { unit ->
+        val died = unit.takeDamage(damagePerUnit)
+        if (died) {
+            unitManager.removeUnit(unit.id)
+        }
+    }
+
+    // Notify team
+    broadcastToTeam(team, "Your units are starving! (-$damagePerUnit HP each)")
+}
+```
+
+---
+
+## Step 6: Train Command
+
+```kotlin
+class TrainCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "train",
+    "Train a unit at the nearest military building"
+) {
+    private val unitArg = withRequiredArg("unit", "unit type", ArgTypes.STRING)
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val unitName = context.get(unitArg).uppercase()
+
+        // Parse unit type
+        val unitType = try {
+            UnitType.valueOf(unitName)
+        } catch (e: IllegalArgumentException) {
+            context.sendMessage(Message.raw("Unknown unit: $unitName"))
+            context.sendMessage(Message.raw("Available: ${UnitType.values().joinToString { it.name }}"))
+            return
+        }
+
+        // Find the required building
+        val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+        val requiredBuilding = unitType.getRequiredBuilding()
+
+        val building = if (requiredBuilding != null) {
+            plugin.gameManager.buildingManager
+                .getTeamBuildingsOfType(team, requiredBuilding)
+                .firstOrNull()
+        } else {
+            // Peasants can be trained from any building? Or town center?
+            // For simplicity, allow from any complete building
+            plugin.gameManager.buildingManager
+                .getTeamBuildings(team)
+                .firstOrNull { it.isComplete }
+        }
+
+        if (building == null) {
+            val buildingName = requiredBuilding?.displayName ?: "building"
+            context.sendMessage(Message.raw("You need a $buildingName to train ${unitType.displayName}!"))
+            return
+        }
+
+        // Try to queue
+        val result = plugin.gameManager.unitManager.tryQueueUnit(
+            playerRef.uuid,
+            unitType,
+            building
+        )
+
+        when (result) {
+            QueueResult.SUCCESS -> {
+                context.sendMessage(Message.raw("Training ${unitType.displayName}..."))
+                context.sendMessage(Message.raw("Time: ${unitType.trainTimeSeconds}s"))
+                context.sendMessage(Message.raw("Queue: ${building.trainingQueue.size}/${building.maxQueueSize}"))
+            }
+            QueueResult.INSUFFICIENT_RESOURCES -> {
+                context.sendMessage(Message.raw("Not enough resources!"))
+                context.sendMessage(Message.raw("Need: ${unitType.formatCosts()}"))
+            }
+            QueueResult.UNIT_CAP_REACHED -> {
+                val cap = plugin.gameManager.unitManager.maxUnitsPerTeam
+                context.sendMessage(Message.raw("Unit cap reached ($cap)!"))
+            }
+            QueueResult.QUEUE_FULL -> {
+                context.sendMessage(Message.raw("Training queue is full!"))
+            }
+            else -> {
+                context.sendMessage(Message.raw("Cannot train: $result"))
+            }
+        }
+    }
+}
+```
+
+---
+
+## Step 7: Units Command
+
+```kotlin
+class UnitsCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "units",
+    "List your team's units or unit types"
+) {
+    private val listFlag = withFlagArg("list", "Show all unit types")
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+
+        if (context.get(listFlag)) {
+            // Show all unit types
+            context.sendMessage(Message.raw("=== Unit Types ==="))
+            UnitType.values().forEach { type ->
+                context.sendMessage(Message.raw(""))
+                context.sendMessage(Message.raw("${type.displayName}"))
+                context.sendMessage(Message.raw("  Cost: ${type.formatCosts()}"))
+                context.sendMessage(Message.raw("  HP: ${type.maxHealth} | DMG: ${type.damage} | Range: ${type.attackRange}"))
+                context.sendMessage(Message.raw("  Upkeep: ${type.foodUpkeep} food/min"))
+                context.sendMessage(Message.raw("  Requires: ${type.getRequiredBuilding()?.displayName ?: "None"}"))
+            }
+        } else {
+            // Show team's units
+            val units = plugin.gameManager.unitManager.getTeamUnits(team)
+            val unitCount = plugin.gameManager.unitManager.getTeamUnitCount(team)
+            val maxUnits = plugin.gameManager.unitManager.maxUnitsPerTeam
+            val totalUpkeep = plugin.gameManager.unitManager.getTotalFoodUpkeep(team)
+
+            context.sendMessage(Message.raw("=== ${team.displayName} Army ==="))
+            context.sendMessage(Message.raw("Units: $unitCount / $maxUnits"))
+            context.sendMessage(Message.raw("Food Upkeep: $totalUpkeep/min"))
+            context.sendMessage(Message.raw(""))
+
+            // Group by type
+            val grouped = units.groupBy { it.type }
+            grouped.forEach { (type, unitList) ->
+                val avgHealth = unitList.map { it.healthPercent }.average()
+                context.sendMessage(Message.raw(
+                    "${type.displayName}: ${unitList.size} (${(avgHealth * 100).toInt()}% avg HP)"
+                ))
+            }
+
+            if (units.isEmpty()) {
+                context.sendMessage(Message.raw("No units. Use /train <type> to train units."))
+            }
+        }
+    }
+}
+```
+
+---
+
+## Step 8: Update GameManager
+
+```kotlin
+class GameManager(private val plugin: JavaPlugin) {
+
+    val teamManager = TeamManager(plugin)
+    val resourceManager = ResourceManager(plugin)
+    val buildingManager: BuildingManager
+    val buildingEffects: BuildingEffects
+    val unitManager: UnitManager
+
+    init {
+        buildingManager = BuildingManager(plugin, resourceManager, teamManager)
+        buildingEffects = BuildingEffects(buildingManager)
+        unitManager = UnitManager(plugin, resourceManager, teamManager, buildingManager, buildingEffects)
+    }
+
+    // ... rest of implementation
+}
+```
+
+---
+
+## Unit Types Reference
+
+| Unit | Cost | Time | HP | DMG | Range | Upkeep | Building |
+|------|------|------|-----|-----|-------|--------|----------|
+| Peasant | 20 Food | 10s | 50 | 5 | 1.5 | 1/min | None |
+| Warrior | 30 Food, 10 Gold | 20s | 100 | 15 | 2.0 | 2/min | Barracks |
+| Archer | 25 Food, 20 Wood, 15 Gold | 25s | 60 | 12 | 15.0 | 2/min | Archery Range |
+| Knight | 50 Food, 30 Iron, 40 Gold | 40s | 200 | 25 | 2.5 | 4/min | Barracks |
+| Crossbowman | 35 Food, 15 Wood, 20 Iron, 25 Gold | 30s | 70 | 18 | 12.0 | 3/min | Archery Range |
+
+---
+
+## Key Concepts Explained
+
+### Why Separate Unit from Entity?
+
+```kotlin
+// Entity = what the player sees (model, position, animations)
+// Unit = game logic state (health, commands, team)
+
+// The entity exists in the ECS world
+val entityRef: Ref<EntityStore>
+
+// The unit exists in our game logic
+val unit = Unit(type = WARRIOR, team = RED)
+unit.entityRef = entityRef  // Link them
+
+// Why separate?
+// - Units have complex state (commands, targets, queues)
+// - ECS is for rendering and physics
+// - Game logic is easier to reason about in objects
+```
+
+### Training Queue Pattern
+
+```kotlin
+// Bad: Instant unit creation
+resourceManager.spend(costs)
+spawnUnit(type)  // Instant army!
+
+// Good: Training queue
+building.queueUnit(type)  // Resources spent
+// ... wait for trainTimeSeconds ...
+building.tickTraining()  // Returns type when complete
+spawnUnit(type)  // Delayed, strategic
+```
+
+Queues add:
+- Build order strategy
+- Counterplay (kill the building mid-training)
+- Pacing
+
+### Food Upkeep
+
+```kotlin
+// Without upkeep: build huge army, never worry
+army.size = 1000  // Free forever
+
+// With upkeep: armies are expensive to maintain
+upkeep = army.sumOf { it.foodUpkeep }  // 2000 food/min!
+
+// Strategic implications:
+// - Can't just hoard units
+// - Economy matters even mid-game
+// - Losing farms = army starves
+```
+
+---
+
+## What's Next
+
+In [Part 4: Combat & Win Conditions](/tutorials/rts-game-part4), we'll add:
+- Combat system (units fighting each other)
+- Building attacks and destruction
+- Victory conditions
+- End-game sequence

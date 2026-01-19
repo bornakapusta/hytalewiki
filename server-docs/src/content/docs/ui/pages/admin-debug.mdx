@@ -1,0 +1,128 @@
+---
+title: Admin & Debug UI
+description: UI components for administration panels, plugin management, and debugging
+---
+
+Components for server administration, objective tracking, and plugin management.
+
+## ObjectiveAdminPanelPage.ui
+
+**Purpose**: Admin panel for viewing and managing game objectives
+**Location**: `Pages/ObjectiveAdminPanelPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ObjectiveList` | Group | Scrollable list of objectives |
+
+```ui
+$C.@Container {
+  Anchor: (Width: 1000, Height: 700);
+
+  #Title {
+    $C.@Title { @Text = %server.customUI.objectiveAdminPanel.title; }
+  }
+
+  #Content {
+    LayoutMode: Left;
+
+    Group #ObjectiveList {
+      FlexWeight: 1;
+      LayoutMode: TopScrolling;
+      ScrollbarStyle: $C.@DefaultScrollbarStyle;
+    }
+  }
+}
+```
+
+## ObjectiveAdminPanelDataSlot.ui
+
+**Purpose**: Individual objective row in admin panel
+**Location**: `Pages/ObjectiveAdminPanelDataSlot.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Name` | Label | Objective name |
+| `#Status` | Label | Current status |
+| `#Progress` | Label | Progress indicator |
+| `#Actions` | Group | Action buttons |
+
+Row element displaying objective details with status and administrative actions.
+
+## PluginListPage.ui
+
+**Purpose**: Plugin browser with details panel
+**Location**: `Pages/PluginListPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#PluginContainer` | Group | Main split layout |
+| `#PluginList` | Group | Scrollable plugin list (350px) |
+| `#PluginInfo` | Group | Plugin details panel |
+| `#PluginName` | Label | Plugin name (22px, bold) |
+| `#PluginIdentifier` | Label | Plugin ID (gray) |
+| `#PluginVersion` | Label | Version number |
+| `#PluginDescription` | Label | Plugin description |
+| `#DescriptiveOnlyOption` | CheckBoxWithLabel | Filter toggle |
+
+```ui
+$C.@Container {
+  Anchor: (Width: 1000, Height: 700);
+
+  #Content {
+    LayoutMode: Top;
+
+    Group #PluginContainer {
+      LayoutMode: Left;
+      Anchor: (Height: 585);
+
+      Group #PluginList {
+        Anchor: (Width: 350);
+        LayoutMode: TopScrolling;
+        ScrollbarStyle: $C.@DefaultScrollbarStyle;
+      }
+
+      Group #PluginInfo {
+        FlexWeight: 1;
+        LayoutMode: TopScrolling;
+        Padding: (Left: 10);
+
+        Label #PluginName {
+          Style: (FontSize: 22, RenderUppercase: true, RenderBold: true);
+        }
+
+        Label #PluginIdentifier {
+          Style: (FontSize: 18, TextColor: #919191);
+        }
+
+        Label #PluginVersion {
+          Style: (FontSize: 15, TextColor: #919191);
+        }
+
+        Label #PluginDescription {}
+      }
+    }
+
+    Group #SearchOptions {
+      LayoutMode: Right;
+
+      $C.@CheckBoxWithLabel #DescriptiveOnlyOption {
+        @Text = %server.customUI.pluginListPage.descriptiveOnly;
+        @Checked = true;
+      }
+    }
+  }
+}
+```
+
+## PluginListButton.ui
+
+**Purpose**: Individual plugin entry button
+**Location**: `Pages/PluginListButton.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | Button | Clickable plugin entry |
+| `#Name` | Label | Plugin display name |
+| `#Status` | Label | Plugin status indicator |
+
+Button element for the plugin list, showing plugin name and current status.

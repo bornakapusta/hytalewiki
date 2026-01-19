@@ -1,0 +1,758 @@
+---
+title: "RTS Game Part 2: Building System"
+description: Placeable structures with construction time and effects
+---
+
+**Goal:** Add buildings that players can place, construct, and use for strategic advantage.
+
+**Prerequisites:** [Part 1: Resource System](/tutorials/rts-game-part1)
+
+**Series:** [Part 1: Resources](/tutorials/rts-game-part1) | Part 2 of 4 | [Part 3: Units](/tutorials/rts-game-part3) | [Part 4: Combat](/tutorials/rts-game-part4)
+
+---
+
+## What We're Building
+
+A building system where:
+- Players place building foundations
+- Buildings construct over time
+- Completed buildings provide bonuses (unit production, defense, income)
+- Buildings can be destroyed
+
+## Understanding Building State
+
+Buildings have a lifecycle:
+
+```
+PLANNED → CONSTRUCTING → COMPLETE → (DESTROYED)
+    ↑          |              |
+    └──────────┴──────────────┘
+         Can be cancelled
+```
+
+**Why track state explicitly?**
+- Different behaviors per state (can't use incomplete buildings)
+- Visual feedback to players
+- Prevents exploits (instant building)
+
+---
+
+## Step 1: Define Building Types
+
+```kotlin
+/**
+ * All building types in the game.
+ *
+ * Each building has:
+ * - Resource costs
+ * - Construction time
+ * - Health points
+ *
+ * Why an enum with data?
+ * - All building configs in one place
+ * - Type-safe references (no "baracks" typos)
+ * - Easy iteration for UI/commands
+ */
+enum class BuildingType(
+    val displayName: String,
+    val costs: Map<Resource, Int>,
+    val buildTimeSeconds: Int,
+    val maxHealth: Int,
+    val description: String
+) {
+    // Economic buildings
+    LUMBER_MILL(
+        displayName = "Lumber Mill",
+        costs = mapOf(Resource.WOOD to 50),
+        buildTimeSeconds = 30,
+        maxHealth = 200,
+        description = "+50% wood gathering speed"
+    ),
+
+    MINE(
+        displayName = "Mine",
+        costs = mapOf(Resource.WOOD to 30, Resource.STONE to 20),
+        buildTimeSeconds = 45,
+        maxHealth = 250,
+        description = "+50% stone/iron gathering speed"
+    ),
+
+    FARM(
+        displayName = "Farm",
+        costs = mapOf(Resource.WOOD to 40),
+        buildTimeSeconds = 20,
+        maxHealth = 100,
+        description = "+5 food per minute"
+    ),
+
+    // Military buildings
+    BARRACKS(
+        displayName = "Barracks",
+        costs = mapOf(Resource.WOOD to 80, Resource.STONE to 40),
+        buildTimeSeconds = 60,
+        maxHealth = 400,
+        description = "Train infantry units"
+    ),
+
+    ARCHERY_RANGE(
+        displayName = "Archery Range",
+        costs = mapOf(Resource.WOOD to 100, Resource.GOLD to 20),
+        buildTimeSeconds = 60,
+        maxHealth = 350,
+        description = "Train ranged units"
+    ),
+
+    // Defensive buildings
+    WATCHTOWER(
+        displayName = "Watchtower",
+        costs = mapOf(Resource.WOOD to 60, Resource.STONE to 80),
+        buildTimeSeconds = 45,
+        maxHealth = 500,
+        description = "Attacks nearby enemies"
+    ),
+
+    WALL(
+        displayName = "Wall",
+        costs = mapOf(Resource.STONE to 30),
+        buildTimeSeconds = 15,
+        maxHealth = 800,
+        description = "Blocks enemy movement"
+    );
+
+    /**
+     * Format costs for display.
+     */
+    fun formatCosts(): String {
+        return costs.entries.joinToString(", ") { (res, amt) ->
+            "$amt ${res.displayName}"
+        }
+    }
+}
+```
+
+---
+
+## Step 2: Building State
+
+```kotlin
+enum class BuildingState {
+    CONSTRUCTING,  // Being built
+    COMPLETE,      // Fully functional
+    DESTROYED      // Rubble (could be rebuilt)
+}
+```
+
+---
+
+## Step 3: Building Instance
+
+Represents a single placed building:
+
+```kotlin
+import org.joml.Vector3d
+import java.util.UUID
+
+/**
+ * A single building instance in the world.
+ *
+ * Why a class instead of ECS component?
+ * - Buildings are long-lived, complex objects
+ * - Need to track construction progress
+ * - Easier to serialize/persist
+ *
+ * For simple markers, ECS components work better.
+ * For complex game objects, classes are clearer.
+ */
+data class Building(
+    val id: UUID = UUID.randomUUID(),
+    val type: BuildingType,
+    val team: Team,
+    val position: Vector3d,
+    var state: BuildingState = BuildingState.CONSTRUCTING,
+    var health: Int = type.maxHealth,
+    var constructionProgress: Int = 0  // seconds completed
+) {
+    /**
+     * How far along construction is (0.0 to 1.0).
+     */
+    val constructionPercent: Double
+        get() = constructionProgress.toDouble() / type.buildTimeSeconds
+
+    /**
+     * Is this building fully constructed?
+     */
+    val isComplete: Boolean
+        get() = state == BuildingState.COMPLETE
+
+    /**
+     * Is this building still functional?
+     */
+    val isAlive: Boolean
+        get() = state != BuildingState.DESTROYED && health > 0
+
+    /**
+     * Apply damage to this building.
+     * Returns true if building was destroyed.
+     */
+    fun takeDamage(amount: Int): Boolean {
+        health = (health - amount).coerceAtLeast(0)
+        if (health == 0) {
+            state = BuildingState.DESTROYED
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Advance construction by one tick.
+     * Returns true if construction just completed.
+     */
+    fun tickConstruction(): Boolean {
+        if (state != BuildingState.CONSTRUCTING) return false
+
+        constructionProgress++
+        if (constructionProgress >= type.buildTimeSeconds) {
+            state = BuildingState.COMPLETE
+            return true
+        }
+        return false
+    }
+}
+```
+
+---
+
+## Step 4: Building Manager
+
+Manages all buildings:
+
+```kotlin
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import org.joml.Vector3d
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Manages building placement, construction, and effects.
+ */
+class BuildingManager(
+    private val plugin: JavaPlugin,
+    private val resourceManager: ResourceManager,
+    private val teamManager: TeamManager
+) {
+    // All buildings in the game
+    private val buildings = ConcurrentHashMap<UUID, Building>()
+
+    // Quick lookup: position → building (for collision checks)
+    private val buildingsByPosition = ConcurrentHashMap<String, Building>()
+
+    // Configuration
+    val minBuildingDistance = 3.0  // Minimum distance between buildings
+
+    /**
+     * Try to place a building.
+     *
+     * Returns the building if successful, null if failed.
+     */
+    fun tryPlaceBuilding(
+        playerUuid: UUID,
+        type: BuildingType,
+        position: Vector3d
+    ): Building? {
+        // Get player's team
+        val team = teamManager.getTeam(playerUuid)
+        if (team == Team.NONE) {
+            return null
+        }
+
+        // Check if position is valid
+        if (!isValidBuildPosition(position, team)) {
+            return null
+        }
+
+        // Check if team can afford it
+        if (!resourceManager.trySpendMultiple(team, type.costs)) {
+            return null
+        }
+
+        // Create building
+        val building = Building(
+            type = type,
+            team = team,
+            position = position
+        )
+
+        // Register it
+        buildings[building.id] = building
+        buildingsByPosition[positionKey(position)] = building
+
+        plugin.logger.atInfo().log(
+            "Building placed: ${type.displayName} at $position by team $team"
+        )
+
+        return building
+    }
+
+    /**
+     * Check if a position is valid for building.
+     */
+    private fun isValidBuildPosition(position: Vector3d, team: Team): Boolean {
+        // Check for nearby buildings (too close)
+        for (building in buildings.values) {
+            val distance = position.distance(building.position)
+            if (distance < minBuildingDistance) {
+                return false
+            }
+        }
+
+        // Could add more checks:
+        // - Terrain (flat enough?)
+        // - Team territory
+        // - Blocked by water/cliffs
+
+        return true
+    }
+
+    /**
+     * Get building at a position (or near it).
+     */
+    fun getBuildingAt(position: Vector3d, radius: Double = 1.0): Building? {
+        return buildings.values.find { building ->
+            building.position.distance(position) <= radius
+        }
+    }
+
+    /**
+     * Get all buildings for a team.
+     */
+    fun getTeamBuildings(team: Team): List<Building> {
+        return buildings.values.filter { it.team == team && it.isAlive }
+    }
+
+    /**
+     * Get buildings of a specific type for a team.
+     */
+    fun getTeamBuildingsOfType(team: Team, type: BuildingType): List<Building> {
+        return getTeamBuildings(team).filter { it.type == type && it.isComplete }
+    }
+
+    /**
+     * Check if a team has a specific building type.
+     */
+    fun teamHasBuilding(team: Team, type: BuildingType): Boolean {
+        return getTeamBuildingsOfType(team, type).isNotEmpty()
+    }
+
+    /**
+     * Remove a building.
+     */
+    fun removeBuilding(buildingId: UUID) {
+        val building = buildings.remove(buildingId)
+        if (building != null) {
+            buildingsByPosition.remove(positionKey(building.position))
+        }
+    }
+
+    /**
+     * Called every game tick (1 second).
+     * Advances construction on all buildings.
+     */
+    fun tick() {
+        for (building in buildings.values) {
+            if (building.tickConstruction()) {
+                // Building just completed!
+                onBuildingComplete(building)
+            }
+        }
+    }
+
+    /**
+     * Called when a building finishes construction.
+     */
+    private fun onBuildingComplete(building: Building) {
+        plugin.logger.atInfo().log(
+            "${building.type.displayName} completed for ${building.team}"
+        )
+
+        // Could broadcast to team, play sound, etc.
+    }
+
+    private fun positionKey(pos: Vector3d): String {
+        return "${pos.x.toInt()},${pos.y.toInt()},${pos.z.toInt()}"
+    }
+
+    /**
+     * Get all buildings (for serialization/debug).
+     */
+    fun getAllBuildings(): Collection<Building> = buildings.values
+}
+```
+
+---
+
+## Step 5: Building Effects
+
+Buildings should provide bonuses. Let's implement some:
+
+```kotlin
+/**
+ * Calculates bonuses from buildings.
+ *
+ * This is called by other systems to check if bonuses apply.
+ */
+class BuildingEffects(private val buildingManager: BuildingManager) {
+
+    /**
+     * Get resource gathering multiplier for a team.
+     *
+     * LUMBER_MILL: +50% wood
+     * MINE: +50% stone/iron
+     */
+    fun getGatheringMultiplier(team: Team, resource: Resource): Double {
+        var multiplier = 1.0
+
+        when (resource) {
+            Resource.WOOD -> {
+                if (buildingManager.teamHasBuilding(team, BuildingType.LUMBER_MILL)) {
+                    multiplier += 0.5
+                }
+            }
+            Resource.STONE, Resource.IRON -> {
+                if (buildingManager.teamHasBuilding(team, BuildingType.MINE)) {
+                    multiplier += 0.5
+                }
+            }
+            else -> { /* No bonus */ }
+        }
+
+        return multiplier
+    }
+
+    /**
+     * Get passive food income per minute for a team.
+     *
+     * Each FARM provides +5 food/minute.
+     */
+    fun getFoodIncomePerMinute(team: Team): Int {
+        val farms = buildingManager.getTeamBuildingsOfType(team, BuildingType.FARM)
+        return farms.size * 5
+    }
+
+    /**
+     * Check if a team can train a specific unit type.
+     *
+     * Infantry requires BARRACKS
+     * Archers require ARCHERY_RANGE
+     */
+    fun canTrainUnit(team: Team, unitType: UnitType): Boolean {
+        return when (unitType) {
+            UnitType.WARRIOR, UnitType.KNIGHT ->
+                buildingManager.teamHasBuilding(team, BuildingType.BARRACKS)
+            UnitType.ARCHER, UnitType.CROSSBOWMAN ->
+                buildingManager.teamHasBuilding(team, BuildingType.ARCHERY_RANGE)
+            UnitType.PEASANT -> true  // Always available
+        }
+    }
+}
+```
+
+---
+
+## Step 6: Update Resource Gathering
+
+Modify the block break handler to use building bonuses:
+
+```kotlin
+// In RTSPlugin, update the BreakBlockEvent handler:
+
+eventRegistry.register(BreakBlockEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    val uuid = playerRef.uuid
+
+    val team = gameManager.teamManager.getTeam(uuid)
+    if (team == Team.NONE) return@register
+
+    val blockType = event.blockType.toString()
+    val resource = Resource.fromBlockType(blockType) ?: return@register
+
+    // Base yield
+    var amount = calculateYield(blockType)
+
+    // Apply building bonus
+    val multiplier = gameManager.buildingEffects.getGatheringMultiplier(team, resource)
+    amount = (amount * multiplier).toInt()
+
+    gameManager.resourceManager.addResource(team, resource, amount)
+    gameManager.teamManager.getPlayerData(uuid)?.addGathered(resource, amount)
+
+    val player = playerRef.holder?.getComponent(Player.getComponentType())
+    if (multiplier > 1.0) {
+        player?.sendMessage(Message.raw("+$amount ${resource.displayName} (bonus!)"))
+    } else {
+        player?.sendMessage(Message.raw("+$amount ${resource.displayName}"))
+    }
+}
+```
+
+---
+
+## Step 7: Food Income in Game Loop
+
+```kotlin
+// In GameManager.tick():
+
+private fun tick() {
+    tickCount++
+
+    // Building construction progress
+    buildingManager.tick()
+
+    // Passive gold income every 10 seconds
+    if (tickCount % 10 == 0) {
+        distributePassiveIncome()
+    }
+
+    // Food income every 60 seconds (farms)
+    if (tickCount % 60 == 0) {
+        distributeFarmIncome()
+    }
+}
+
+private fun distributeFarmIncome() {
+    Team.playableTeams.forEach { team ->
+        val foodIncome = buildingEffects.getFoodIncomePerMinute(team)
+        if (foodIncome > 0) {
+            resourceManager.addResource(team, Resource.FOOD, foodIncome)
+        }
+    }
+}
+```
+
+---
+
+## Step 8: Build Command
+
+Let players place buildings via command:
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.arguments.types.ArgTypes
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+
+class BuildCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "build",
+    "Place a building"
+) {
+    // Building type argument
+    private val typeArg = withRequiredArg("type", "building type", ArgTypes.STRING)
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val typeName = context.get(typeArg).uppercase()
+
+        // Parse building type
+        val buildingType = try {
+            BuildingType.valueOf(typeName)
+        } catch (e: IllegalArgumentException) {
+            context.sendMessage(Message.raw("Unknown building type: $typeName"))
+            context.sendMessage(Message.raw("Available: ${BuildingType.values().joinToString { it.name }}"))
+            return
+        }
+
+        // Get player position
+        val transform = store.getComponent(ref, TransformComponent.getComponentType())
+        val position = transform?.position
+        if (position == null) {
+            context.sendMessage(Message.raw("Could not determine your position"))
+            return
+        }
+
+        // Check costs first (for better error message)
+        val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+        val currentResources = plugin.gameManager.resourceManager.getAllResources(team)
+
+        for ((resource, cost) in buildingType.costs) {
+            val have = currentResources[resource] ?: 0
+            if (have < cost) {
+                context.sendMessage(Message.raw("Not enough resources!"))
+                context.sendMessage(Message.raw("Need: ${buildingType.formatCosts()}"))
+                return
+            }
+        }
+
+        // Try to place
+        val building = plugin.gameManager.buildingManager.tryPlaceBuilding(
+            playerRef.uuid,
+            buildingType,
+            position
+        )
+
+        if (building != null) {
+            context.sendMessage(Message.raw("Building ${buildingType.displayName}..."))
+            context.sendMessage(Message.raw("Construction time: ${buildingType.buildTimeSeconds}s"))
+        } else {
+            context.sendMessage(Message.raw("Cannot build here!"))
+        }
+    }
+}
+```
+
+---
+
+## Step 9: Buildings List Command
+
+```kotlin
+class BuildingsCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "buildings",
+    "List available buildings or your team's buildings"
+) {
+    private val listFlag = withFlagArg("list", "Show all building types")
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        if (context.get(listFlag)) {
+            // Show all building types
+            context.sendMessage(Message.raw("=== Available Buildings ==="))
+            BuildingType.values().forEach { type ->
+                context.sendMessage(Message.raw(""))
+                context.sendMessage(Message.raw("${type.displayName} (/build ${type.name})"))
+                context.sendMessage(Message.raw("  Cost: ${type.formatCosts()}"))
+                context.sendMessage(Message.raw("  Time: ${type.buildTimeSeconds}s"))
+                context.sendMessage(Message.raw("  ${type.description}"))
+            }
+        } else {
+            // Show team's buildings
+            val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+            val buildings = plugin.gameManager.buildingManager.getTeamBuildings(team)
+
+            if (buildings.isEmpty()) {
+                context.sendMessage(Message.raw("Your team has no buildings."))
+                context.sendMessage(Message.raw("Use /buildings --list to see options."))
+                return
+            }
+
+            context.sendMessage(Message.raw("=== ${team.displayName} Buildings ==="))
+            buildings.forEach { building ->
+                val status = when (building.state) {
+                    BuildingState.CONSTRUCTING ->
+                        "Building... ${(building.constructionPercent * 100).toInt()}%"
+                    BuildingState.COMPLETE ->
+                        "Complete (${building.health}/${building.type.maxHealth} HP)"
+                    BuildingState.DESTROYED ->
+                        "Destroyed"
+                }
+                context.sendMessage(Message.raw("${building.type.displayName}: $status"))
+            }
+        }
+    }
+}
+```
+
+---
+
+## Step 10: Update GameManager
+
+Add building systems:
+
+```kotlin
+class GameManager(private val plugin: JavaPlugin) {
+
+    val teamManager = TeamManager(plugin)
+    val resourceManager = ResourceManager(plugin)
+    val buildingManager: BuildingManager
+    val buildingEffects: BuildingEffects
+
+    init {
+        buildingManager = BuildingManager(plugin, resourceManager, teamManager)
+        buildingEffects = BuildingEffects(buildingManager)
+    }
+
+    // ... rest of GameManager
+}
+```
+
+---
+
+## Complete Building Types Reference
+
+| Building | Cost | Time | Effect |
+|----------|------|------|--------|
+| Lumber Mill | 50 Wood | 30s | +50% wood gathering |
+| Mine | 30 Wood, 20 Stone | 45s | +50% stone/iron gathering |
+| Farm | 40 Wood | 20s | +5 food/minute |
+| Barracks | 80 Wood, 40 Stone | 60s | Train infantry |
+| Archery Range | 100 Wood, 20 Gold | 60s | Train ranged units |
+| Watchtower | 60 Wood, 80 Stone | 45s | Auto-attacks enemies |
+| Wall | 30 Stone | 15s | Blocks movement |
+
+---
+
+## Key Concepts Explained
+
+### Why Separate Building from BuildingType?
+
+```kotlin
+// BuildingType = the template/blueprint
+// Defines WHAT a barracks is
+BuildingType.BARRACKS  // costs, build time, etc.
+
+// Building = an actual instance
+// A specific barracks at position (100, 64, 200) owned by RED team
+Building(type = BARRACKS, team = RED, position = ...)
+```
+
+This is the **Flyweight pattern**: share common data (BuildingType) across many instances (Building).
+
+### Why Track Construction Progress?
+
+```kotlin
+// Bad: Instant buildings
+val building = Building(state = COMPLETE)  // Pay, instantly get building
+
+// Good: Construction time
+building.state = CONSTRUCTING
+building.constructionProgress = 0
+// Each tick: progress++
+// When progress >= buildTime: state = COMPLETE
+```
+
+Construction time adds:
+- Strategic depth (plan ahead, defend construction)
+- Counterplay (destroy enemy buildings mid-construction)
+- Pacing (can't spam buildings instantly)
+
+### Building Position Lookup
+
+```kotlin
+// O(n) lookup - slow for many buildings
+buildings.values.find { it.position == target }
+
+// O(1) lookup with spatial hash
+buildingsByPosition["100,64,200"]
+
+// Even better for games: spatial data structures
+// - Quadtree (2D)
+// - Octree (3D)
+// - Grid partitioning
+```
+
+---
+
+## What's Next
+
+In [Part 3: Unit System](/tutorials/rts-game-part3), we'll add:
+- Unit types (Peasant, Warrior, Archer)
+- Unit spawning from buildings
+- Unit movement and pathfinding basics
+- Food consumption (unit upkeep)

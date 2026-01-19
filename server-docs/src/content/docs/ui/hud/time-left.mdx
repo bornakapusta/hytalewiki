@@ -1,0 +1,84 @@
+---
+title: Time Left HUD
+description: In-game timer display for time-limited events
+---
+
+HUD element displaying remaining time for timed game events.
+
+## TimeLeft.ui
+
+**Purpose**: Countdown timer display with clock icon
+**Location**: `Hud/TimeLeft.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#TimeLeft` | Group | Timer container |
+| `#TimeLabel` | TimerLabel | Countdown display |
+
+```ui
+Group {
+  LayoutMode: Left;
+  Anchor: (Top: 20, Height: 60);
+
+  Group #TimeLeft {
+    Background: #000000(0.2);
+    Anchor: (Left: 20);
+    Padding: (Horizontal: 20, Vertical: 10);
+    LayoutMode: Left;
+
+    Group {
+      Background: "Clock.png";
+      Anchor: (Width: 40, Height: 40, Right: 10);
+    }
+
+    TimerLabel #TimeLabel {
+      Style: (FontSize: 32, Alignment: Center);
+      Seconds: 15 * 60;
+    }
+  }
+}
+```
+
+## Structure
+
+The timer consists of:
+1. **Container** - Semi-transparent black background
+2. **Clock Icon** - 40x40 clock image
+3. **TimerLabel** - Large countdown display (32px)
+
+## TimerLabel Element
+
+The `TimerLabel` element is a specialized label that automatically formats and counts down time:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `Seconds` | Number | Initial time in seconds |
+| `Style` | LabelStyle | Text styling |
+
+The timer automatically formats as `MM:SS` and counts down when active.
+
+## Positioning
+
+The timer is positioned:
+- 20px from top of screen
+- 20px from left edge
+- 60px total height
+
+## Styling
+
+| Property | Value |
+|----------|-------|
+| Background | `#000000(0.2)` (20% opacity black) |
+| Icon Size | 40x40 |
+| Font Size | 32px |
+| Padding | 20px horizontal, 10px vertical |
+
+## Usage
+
+This HUD element is typically used for:
+- Portal exploration time limits
+- Event countdowns
+- Game mode timers
+- Timed challenges
+
+The timer is controlled by server-side logic which sets the `Seconds` property and starts/stops the countdown.

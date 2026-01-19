@@ -1,0 +1,144 @@
+---
+title: Prefab Editing UI
+description: UI components for the prefab editor, browser, and save settings
+---
+
+Components for prefab editing, browsing, and configuration management.
+
+## PrefabEditorSettings.ui
+
+**Purpose**: Main prefab editor configuration with multiple sub-pages
+**Location**: `Pages/PrefabEditorSettings.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#SavedConfigs` | Group | Saved configuration dropdown |
+| `#RootDir` | Group | Root directory selector |
+| `#PrefabPaths` | Group | Prefab paths input with browse |
+| `#BrowseButton` | SecondaryTextButton | Open file browser |
+| `#Recursive` | Group | Recursive search toggle |
+| `#Children` | Group | Load children toggle |
+| `#Entities` | Group | Load entities toggle |
+| `#EnableWorldTicking` | Group | World ticking toggle |
+| `#DesiredYLevel` | NumberInput | Y-level setting |
+| `#BlocksBetweenPrefabs` | NumberInput | Spacing setting |
+| `#WorldGenType` | Group | World gen type dropdown |
+| `#Environment` | Group | Environment dropdown |
+| `#GrassTint` | Group | Grass color picker |
+| `#PasteAxis` | Group | Paste axis dropdown |
+| `#AlignmentMethod` | Group | Alignment dropdown |
+| `#RowSplitMode` | Group | Row split dropdown |
+| `#LoadButton` | TextButton | Load prefabs action |
+| `#SavePropertiesButton` | SecondaryTextButton | Save config |
+| `#CancelButton` | SecondaryTextButton | Cancel action |
+
+```ui
+Group #PrefabPaths {
+  LayoutMode: Left;
+
+  @InputLabel { Text: %server.customUI.prefabEditorSettings.prefabPaths; }
+
+  $C.@TextField #Input {
+    FlexWeight: 1;
+    MaxLength: 4096;
+  }
+
+  $C.@SecondaryTextButton #BrowseButton {
+    @Anchor = (Width: 140);
+    Text: %server.customUI.prefabEditorSettings.browse;
+  }
+}
+```
+
+### Sub-pages
+
+The file contains multiple overlay pages:
+
+- `#MainPage` - Primary settings form
+- `#SaveConfigPage` - Save configuration dialog
+- `#LoadingPage` - Loading progress with status and progress bar
+- `#BrowserPage` - File browser for prefab selection
+
+## PrefabEditorSaveSettings.ui
+
+**Purpose**: Save settings dialog for prefab configurations
+**Location**: `Pages/PrefabEditorSaveSettings.ui`
+
+Dialog for saving current prefab editor settings as a named configuration.
+
+## PrefabEditorExitConfirm.ui
+
+**Purpose**: Exit confirmation dialog with unsaved changes warning
+**Location**: `Pages/PrefabEditorExitConfirm.ui`
+
+Confirmation dialog shown when exiting with unsaved changes.
+
+## PrefabBrowser.ui
+
+**Purpose**: File browser for navigating and selecting prefabs
+**Location**: `Pages/PrefabBrowser.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#RootSelector` | DropdownBox | Root directory selector |
+| `#FileList` | Group | Scrollable file/folder list |
+| `#PathBreadcrumb` | Group | Current path display |
+
+Reusable browser component for navigating file systems and selecting prefabs.
+
+## PrefabListPage.ui
+
+**Purpose**: List view of available prefabs
+**Location**: `Pages/PrefabListPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#PrefabList` | Group | Scrollable prefab list |
+| `#SearchInput` | TextField | Prefab search |
+
+Displays loaded prefabs in a searchable list format.
+
+## PrefabSavePage.ui
+
+**Purpose**: Prefab save dialog with name and path
+**Location**: `Pages/PrefabSavePage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#NameInput` | TextField | Prefab name |
+| `#PathInput` | TextField | Save path |
+| `#SaveButton` | TextButton | Save action |
+| `#CancelButton` | SecondaryTextButton | Cancel |
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Width: 500);
+
+  #Content {
+    LayoutMode: Top;
+
+    Group #NameSection {
+      Label { Text: "Name"; }
+      $C.@TextField #NameInput {}
+    }
+
+    Group #PathSection {
+      Label { Text: "Path"; }
+      $C.@TextField #PathInput {}
+    }
+
+    Group #Buttons {
+      LayoutMode: Center;
+      $C.@TextButton #SaveButton { Text: "Save"; }
+      $C.@SecondaryTextButton #CancelButton { Text: "Cancel"; }
+    }
+  }
+}
+```
+
+## PrefabSpawnerSettingsPage.ui
+
+**Purpose**: Configuration for prefab spawner entities
+**Location**: `Pages/PrefabSpawnerSettingsPage.ui`
+
+Settings dialog for configuring prefab spawner behavior and parameters.

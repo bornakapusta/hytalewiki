@@ -1,0 +1,54 @@
+---
+title: Hytale Docs
+description: Documentation for the Hytale Server Plugin API
+template: splash
+hero:
+  tagline: Build powerful plugins for Hytale servers
+  actions:
+    - text: Get Started
+      link: /introduction/
+      icon: right-arrow
+    - text: Quick Reference
+      link: /api-reference/
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Core Systems
+
+<CardGrid stagger>
+	<Card title="Plugin System" icon="setting">
+		Extend `JavaPlugin`, manage lifecycle, and access registries.
+		[Learn more](/your-first-plugin/)
+	</Card>
+	<Card title="Event System" icon="list-format">
+		Register listeners with priorities, handle sync/async events.
+		[Learn more](/handling-events/)
+	</Card>
+	<Card title="Command System" icon="rocket">
+		Create commands with arguments, permissions, and subcommands.
+		[Learn more](/creating-commands/)
+	</Card>
+	<Card title="Task Scheduler" icon="add-document">
+		Schedule one-time and repeating tasks with automatic cleanup.
+		[Learn more](/scheduling-tasks/)
+	</Card>
+</CardGrid>
+
+## Game Systems
+
+<CardGrid>
+	<Card title="Entity API" icon="puzzle">
+		ECS architecture, component access, and entity management.
+		[Learn more](/spawning-entities/)
+	</Card>
+	<Card title="World API" icon="open-book">
+		Worlds, chunks, blocks, and world generation.
+		[Learn more](/manipulating-blocks/)
+	</Card>
+	<Card title="Examples" icon="document">
+		Real code examples from the PawnAge plugin.
+		[Learn more](/tutorials/pvp-arena-part1/)
+	</Card>
+</CardGrid>

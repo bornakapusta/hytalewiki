@@ -1,0 +1,227 @@
+---
+title: Built-in Modules
+description: Pre-built gameplay systems
+---
+
+## Overview
+
+Hytale includes **44 built-in plugins** across **32 major gameplay systems** in `com.hypixel.hytale.builtin`.
+
+## Module List
+
+| Module | Description |
+|--------|-------------|
+| `adventure/` | Core gameplay progression (15 sub-plugins) |
+| `ambience/` | Environmental effects |
+| `beds/` | Bed/respawn mechanics |
+| `blockphysics/` | Block stability simulation |
+| `blockspawner/` | Dynamic block spawning |
+| `blocktick/` | Block update system |
+| `buildertools/` | Prefab editor utilities |
+| `crafting/` | Crafting benches and recipes |
+| `creativehub/` | Creative mode utilities |
+| `crouchslide/` | Crouch-slide movement |
+| `deployables/` | Deployable structures |
+| `fluid/` | Water/lava simulation |
+| `instances/` | Instanced worlds |
+| `mantling/` | Ledge climbing |
+| `mounts/` | Mount/riding system |
+| `npccombatactionevaluator/` | NPC combat AI |
+| `parkour/` | Checkpoint system |
+| `portals/` | Portal mechanics |
+| `safetyroll/` | Fall damage reduction |
+| `teleport/` | Teleportation |
+| `weather/` | Weather system |
+| `worldgen/` | World generation |
+
+## Adventure Sub-Modules
+
+| Module | Purpose |
+|--------|---------|
+| `camera/` | First-person camera effects |
+| `farming/` | Crop growth, soil, coops |
+| `memories/` | Player history |
+| `npcobjecives/` | NPC-given objectives |
+| `npcreputation/` | NPC reputation |
+| `npcshop/` | NPC trading |
+| `objectives/` | Quest system |
+| `shop/` | Item shops |
+| `stash/` | Player storage |
+| `teleporter/` | Teleportation NPCs |
+
+## Plugin Architecture
+
+All plugins extend `JavaPlugin`:
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    override fun setup() {
+        // Register components, systems, events
+    }
+
+    override fun start() {
+        // Initialize assets, state
+    }
+
+    override fun shutdown() {
+        // Cleanup
+    }
+}
+```
+
+## Key Integration Points
+
+### Component Registration
+
+```kotlin
+// Entity components
+getEntityStoreRegistry().registerComponent(MyComponent::class.java)
+
+// Chunk components
+getChunkStoreRegistry().registerComponent(MyChunkComponent::class.java)
+```
+
+### System Registration
+
+```kotlin
+// Ticking system
+getEntityStoreRegistry().registerSystem(MyTickingSystem())
+
+// Holder system (component additions)
+getEntityStoreRegistry().registerSystem(MyHolderSystem())
+```
+
+### Asset Registration
+
+```kotlin
+HytaleAssetStore.builder(MyAsset::class.java, DefaultAssetMap())
+    .setPath("Path/To/Assets")
+    .setCodec(MyAsset.CODEC)
+    .loadsAfter(DependencyAsset::class.java)
+    .build()
+```
+
+## Crafting System
+
+**Components:**
+- `CraftingManager` - Per-player crafting state
+- `BenchState` - Block-level bench state
+- `ProcessingBenchState` - Processing bench variant
+
+**Features:**
+- Bench types: Simple, Diagram, Structural
+- Recipe learning stored in `PlayerConfigData`
+- Dynamic recipe generation
+- Bench upgrades with material costs
+
+## Mounts System
+
+**Components:**
+- `NPCMountComponent` - NPC as mountable
+- `MountedComponent` - Entity currently mounted
+- `MountedByComponent` - Entity being ridden
+- `MinecartComponent` - Minecart data
+- `BlockMountComponent` - Block seating
+
+**Systems (11 registered):**
+- `NPCMountSystems.OnAdd` - Initialize NPC mount
+- `MountSystems.PlayerMount` - Track mounting
+- `MountSystems.HandleMountInput` - Route input
+- `MountSystems.TrackerUpdate` - Network sync
+
+## Objectives System
+
+**Components:**
+- `ObjectiveHistoryComponent` - Completion history
+- `ReachLocationMarker` - Navigation markers
+
+**Task Types:**
+- `CraftObjectiveTask` - Craft items
+- `GatherObjectiveTask` - Collect items
+- `UseBlockObjectiveTask` - Interact with blocks
+- `ReachLocationTask` - Navigate to location
+- `TreasureMapObjectiveTask` - Hunt treasure
+
+**Features:**
+- 5-minute auto-save via `ScheduledExecutor`
+- Network sync via `TrackOrUpdateObjective` packets
+- Per-world `ObjectiveGameplayConfig`
+
+## Block Physics
+
+- `MAX_SUPPORT_RADIUS = 14` blocks
+- Gravity-affected block detection
+- `CachedAccessor` for multi-chunk queries
+- Runs after `ChunkBlockTickSystem.PreTick`
+
+## Farming System
+
+**Components:**
+- `TilledSoilBlock` - Tilled soil state
+- `FarmingBlock` - Growing crop state
+- `CoopBlock` - Animal coop state
+
+**Features:**
+- Growth stages with `FarmingStageData`
+- Fertilizer via `GrowthModifierAsset`
+- Water/light requirements
+- Spread mechanics for vines
+
+## Portals System
+
+**Components:**
+- `PortalDevice` - Teleporter pad
+- `VoidEvent` - Void invasion data
+- `VoidSpawner` - Spawner config
+
+**Features:**
+- `MAX_CONCURRENT_FRAGMENTS = 4`
+- Curse system for item drops
+- Dynamic portal cleanup
+- `PortalMarkerProvider` for maps
+
+## NPC Combat AI
+
+**Components:**
+- `CombatActionEvaluator` - Decision AI
+- `TargetMemory` - Enemy tracking
+- `DamageMemory` - Damage history
+
+**Features:**
+- Utility-based decision making
+- Chainable attacks (ranged/melee)
+- Memory-based target selection
+- Cooldown management
+
+## Common Patterns
+
+### RefSystem Pattern
+
+```kotlin
+abstract class RefSystem<T : Store> {
+    abstract fun getQuery(): Query<T>
+    abstract fun onEntityAdded(ref: Ref<T>, reason: AddReason, ...)
+    abstract fun onEntityRemove(ref: Ref<T>, reason: RemoveReason, ...)
+}
+```
+
+### Ticking System Pattern
+
+```kotlin
+abstract class EntityTickingSystem<T : Store> {
+    abstract fun getQuery(): Query<T>
+    abstract fun getDependencies(): Set<Dependency<T>>
+    abstract fun tick(dt: Float, index: Int, chunk: ArchetypeChunk<T>, ...)
+}
+```
+
+### Asset Registration Pattern
+
+```kotlin
+HytaleAssetStore.builder(AssetClass::class.java, DefaultAssetMap())
+    .setPath("Path/To/Assets")
+    .setCodec(AssetCodec.CODEC)
+    .loadsAfter(DependencyClass::class.java)
+    .setKeyFunction { it.id }
+    .build()
+```

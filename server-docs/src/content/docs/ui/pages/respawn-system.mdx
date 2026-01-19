@@ -1,0 +1,124 @@
+---
+title: Respawn System UI
+description: UI components for death screens, respawn points, and dropped items
+---
+
+Components for player death handling, respawn point selection, and item recovery.
+
+## RespawnPage.ui
+
+**Purpose**: Main death/respawn screen with death reason and dropped items
+**Location**: `Pages/RespawnPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Title` | Label | "You Died" title |
+| `#DeathReason` | Label | Cause of death text |
+| `#RespawnButton` | TextButton | Respawn action button |
+| `#DeathData` | Group | Death details container |
+| `#ItemsLossStatus` | Label | Item loss description |
+| `#ItemsAmountLoss` | Label | Item count lost |
+| `#DroppedItemsContainer` | Group | Grid of dropped items |
+
+```ui
+Group {
+  Background: "RespawnPageBackground.png";
+
+  Group {
+    Anchor: (Width: 850, Height: 215);
+    Background: "RespawnPageBackgroundInner.png";
+
+    Label #Title {
+      Text: %server.customUI.respawnPage.title;
+      Style: (
+        FontSize: 38,
+        FontName: "Secondary",
+        RenderBold: true,
+        HorizontalAlignment: Center,
+        RenderUppercase: true
+      );
+      MaskTexturePath: "RespawnPageLabelGradient.png";
+    }
+
+    TextButton #RespawnButton {
+      Anchor: (Width: 220, Height: 40);
+      Style: (...$Common.@DefaultTextButtonStyle, Sounds: (...$Sounds.@RespawnActivate));
+      Text: %server.customUI.respawnPage.respawn;
+    }
+  }
+}
+```
+
+## SelectOverrideRespawnPointPage.ui
+
+**Purpose**: Respawn point selection with naming option
+**Location**: `Pages/SelectOverrideRespawnPointPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#RespawnPointList` | Group | Available respawn points |
+| `#Error` | Label | Error message display |
+| `#NameInput` | TextField | Custom respawn name input |
+| `#ConfirmButton` | TextButton | Confirm selection |
+| `#CancelButton` | SecondaryTextButton | Cancel action |
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Width: 500);
+
+  #Content {
+    Group #RespawnPointList {
+      LayoutMode: Top;
+    }
+
+    $C.@TextField #NameInput {
+      Anchor: (Top: 10, Height: 44);
+    }
+
+    Group {
+      LayoutMode: Center;
+
+      $C.@TextButton #ConfirmButton {
+        Text: %server.customUI.confirm;
+      }
+
+      $C.@SecondaryTextButton #CancelButton {
+        Text: %server.customUI.cancel;
+      }
+    }
+  }
+}
+```
+
+## OverrideNearbyRespawnPointPage.ui
+
+**Purpose**: Nearby respawn point override selection
+**Location**: `Pages/OverrideNearbyRespawnPointPage.ui`
+
+Similar to SelectOverrideRespawnPointPage but for nearby respawn points within range.
+
+## OverrideRespawnPointButton.ui
+
+**Purpose**: Individual respawn point selection button
+**Location**: `Pages/OverrideRespawnPointButton.ui`
+
+Button element used within respawn point lists, displaying location name and distance.
+
+## NameRespawnPointPage.ui
+
+**Purpose**: Name input dialog for respawn points
+**Location**: `Pages/NameRespawnPointPage.ui`
+
+Simple dialog for naming a new respawn point after placement.
+
+## DroppedItemSlot.ui
+
+**Purpose**: Individual dropped item display in death screen
+**Location**: `Pages/DroppedItemSlot.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Slot` | ItemSlot | Item icon display |
+| `#Quantity` | Label | Stack count |
+
+Used within the DroppedItemsContainer to show items lost on death. Displays item icon with quantity overlay.

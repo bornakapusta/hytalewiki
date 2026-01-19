@@ -1,0 +1,239 @@
+---
+title: Reusable Components
+description: Shared UI components for buttons, cards, and common elements
+---
+
+Reusable component templates used across multiple UI pages.
+
+## Common/TextButton.ui
+
+**Purpose**: Styled text button with selection states
+**Location**: `Common/TextButton.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | TextButton | Main button element |
+
+```ui
+@LabelStyle = (Hovered: (Background: #000000(0.2)));
+
+@SelectedLabelStyle = (
+  Default: (LabelStyle: (RenderBold: true)),
+  Hovered: (LabelStyle: (RenderBold: true), Background: #000000(0.2))
+);
+
+Group {
+  LayoutMode: Left;
+
+  TextButton #Button {
+    Padding: (Full: 6);
+    Style: @LabelStyle;
+    FlexWeight: 1;
+  }
+}
+```
+
+## Common/ActionButton.ui
+
+**Purpose**: Action button with keyboard binding display
+**Location**: `Common/ActionButton.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Container` | Group | Main layout container |
+| `#NameRight` | Label | Action name (right-aligned) |
+| `#NameLeft` | Label | Action name (left-aligned) |
+| `#BindingModifier1Container` | Group | First modifier key |
+| `#BindingModifier2Container` | Group | Second modifier key |
+| `#BindingContainer` | Group | Main key binding |
+| `#BindingLabel` | Label | Key binding text |
+| `#BindingIcon` | Group | Mouse icon (for click bindings) |
+
+```ui
+Group #Container {
+  LayoutMode: Left;
+  Anchor: (Height: 24);
+
+  Label #NameRight {
+    Style: @LabelStyle;
+    Anchor: (Right: 10);
+    Visible: false;
+  }
+
+  Group #BindingContainer {
+    Anchor: (Height: 24);
+    Background: @BindingButtonBackground;
+    Padding: (Horizontal: 6);
+
+    Label #BindingLabel {
+      Text: "???";
+      Style: @BindingLabelStyle;
+    }
+  }
+
+  Label #NameLeft {
+    Style: @LabelStyle;
+    Anchor: (Left: 10);
+    Visible: false;
+  }
+}
+```
+
+## BasicTextButton.ui
+
+**Purpose**: Simple text button with hover effect
+**Location**: `Pages/BasicTextButton.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Button` | TextButton | Clickable button |
+
+```ui
+TextButton #Button {
+  Padding: (Full: 6);
+  Style: (Hovered: (Background: #000000(0.2)));
+}
+```
+
+## SubcommandCard.ui
+
+**Purpose**: Command subcommand display card
+**Location**: `Pages/SubcommandCard.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#SubcommandName` | Label | Subcommand name (bold, white) |
+| `#SubcommandUsage` | Label | Usage syntax (blue) |
+| `#SubcommandDescription` | Label | Description (dimmed) |
+
+```ui
+Button {
+  Anchor: (Width: 240, Bottom: 10, Right: 10);
+  Padding: (Full: 12);
+  Background: (Color: #1a1a1a(0.6));
+  LayoutMode: Top;
+  Style: (
+    Hovered: (Background: #2a2a2a(0.8)),
+    Pressed: (Background: #3a3a3a(0.9))
+  );
+
+  Label #SubcommandName {
+    Style: (FontSize: 14, RenderBold: true, TextColor: #ffffff);
+  }
+
+  Label #SubcommandUsage {
+    Style: (FontSize: 11, TextColor: #7a9cc6);
+  }
+
+  Label #SubcommandDescription {
+    Style: (FontSize: 11, TextColor: #ffffff(0.7));
+  }
+}
+```
+
+## VariantCard.ui
+
+**Purpose**: Command variant display button
+**Location**: `Pages/VariantCard.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#VariantUsage` | Label | Variant usage text |
+
+```ui
+Button {
+  Padding: (Horizontal: 10, Vertical: 6);
+  Background: (Color: #2a2a2a(0.6));
+  Style: (
+    Hovered: (Background: #3a3a3a(0.8)),
+    Pressed: (Background: #4a4a4a(0.9))
+  );
+
+  Label #VariantUsage {
+    Style: (FontSize: 12, TextColor: #ffffff(0.9));
+  }
+}
+```
+
+## ArgumentTypeItem.ui
+
+**Purpose**: Argument type display element
+**Location**: `Pages/ArgumentTypeItem.ui`
+
+Element showing argument type information in command help displays.
+
+## ParameterItem.ui
+
+**Purpose**: Command parameter display element
+**Location**: `Pages/ParameterItem.ui`
+
+Element showing parameter details including name, type, and description.
+
+## CommandListPage.ui
+
+**Purpose**: Full command browser with details panel
+**Location**: `Pages/CommandListPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#CommandList` | Group | Scrollable command list (250px) |
+| `#CommandInfo` | Group | Command details panel |
+| `#CommandName` | Label | Command name |
+| `#CommandUsageLabel` | Label | Usage syntax |
+| `#CommandDescription` | Label | Command description |
+| `#AliasesSection` | Group | Command aliases |
+| `#AliasesList` | Label | Alias list |
+| `#PermissionSection` | Group | Permission info |
+| `#PermissionLabel` | Label | Required permission |
+| `#BackButton` | TertiaryTextButton | Return to parent |
+| `#SendToChatButton` | SecondaryTextButton | Copy to chat |
+| `#VariantsSection` | Group | Command variants panel |
+| `#VariantsList` | Group | Variant cards container |
+| `#SubcommandSection` | Group | Subcommands section |
+| `#SubcommandCards` | Group | Subcommand cards container |
+| `#ParametersSection` | Group | Parameters panel |
+| `#RequiredArgumentsList` | Group | Required args list |
+| `#OptionalArgumentsList` | Group | Optional args list |
+| `#DefaultArgumentsList` | Group | Default args list |
+| `#FlagArgumentsList` | Group | Flag args list |
+| `#ArgumentTypesSection` | Group | Argument types panel |
+| `#ArgumentTypesList` | Group | Type items container |
+
+```ui
+$C.@Container {
+  Anchor: (Width: 1050, Height: 700);
+
+  #Content {
+    LayoutMode: Left;
+
+    Group #CommandList {
+      Anchor: (Width: 250);
+      LayoutMode: TopScrolling;
+      ScrollbarStyle: $C.@DefaultScrollbarStyle;
+    }
+
+    Group #CommandInfo {
+      FlexWeight: 1;
+      LayoutMode: TopScrolling;
+      Padding: (Left: 10);
+
+      Label #CommandName {
+        Style: (RenderUppercase: true, RenderBold: true, FontSize: 17);
+      }
+
+      Label #CommandUsageLabel {
+        Style: (FontSize: 13, TextColor: #7a9cc6);
+      }
+
+      // ... additional sections
+    }
+  }
+}
+```
+
+## PlaySoundPage.ui
+
+**Purpose**: Sound preview/testing interface
+**Location**: `Pages/PlaySoundPage.ui`
+
+Interface for browsing and testing sound effects, used in development tools.

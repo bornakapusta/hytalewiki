@@ -1,0 +1,253 @@
+---
+title: API Quick Reference
+description: Method signatures for the Hytale Server Plugin API
+---
+
+Quick reference for common API methods. See tutorials for usage examples.
+
+## JavaPlugin
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    override fun setup() { }      // Register commands, events, assets
+    override fun start() { }      // Plugin enabled, start logic
+    override fun shutdown() { }   // Cleanup on shutdown
+}
+
+// Properties
+plugin.logger: HytaleLogger
+plugin.identifier: PluginIdentifier
+plugin.dataDirectory: Path
+plugin.state: PluginState
+
+// Registries
+plugin.eventRegistry: EventRegistry
+plugin.commandRegistry: CommandRegistry
+plugin.taskRegistry: TaskRegistry
+plugin.entityRegistry: EntityRegistry
+plugin.blockStateRegistry: BlockStateRegistry
+plugin.assetRegistry: AssetRegistry
+```
+
+## EventRegistry
+
+```kotlin
+// Basic registration
+eventRegistry.register(EventClass::class.java) { event -> }
+eventRegistry.register(EventPriority.HIGH, EventClass::class.java) { event -> }
+eventRegistry.register(100, EventClass::class.java) { event -> }  // numeric priority
+
+// Async
+eventRegistry.registerAsync(AsyncEventClass::class.java) { future -> future.thenApply { } }
+
+// Special
+eventRegistry.registerGlobal(KeyedEvent::class.java) { event -> }     // all keys
+eventRegistry.registerUnhandled(Event::class.java) { event -> }       // fallback
+```
+
+## CommandRegistry
+
+```kotlin
+commandRegistry.registerCommand(myCommand)
+
+// Command base classes
+CommandBase("name", "description")                    // Sync command
+AbstractAsyncCommand("name", "description")          // Async command
+AbstractPlayerCommand("name", "description")         // Requires player
+AbstractCommandCollection("name", "description")     // Subcommands only
+
+// Arguments
+withRequiredArg("name", "desc", ArgTypes.TYPE): RequiredArg
+withOptionalArg("name", "desc", ArgTypes.TYPE): OptionalArg
+withDefaultArg("name", "desc", ArgTypes.TYPE, default, "default"): DefaultArg
+withFlagArg("name", "desc"): FlagArg
+
+// Context
+context.get(arg): T
+context.provided(arg): Boolean
+context.sender(): CommandSender
+context.isPlayer(): Boolean
+context.sendMessage(Message)
+```
+
+## Player
+
+```kotlin
+// Get player
+playerRef.holder?.getComponent(Player.getComponentType())
+playerRef.uuid: UUID
+playerRef.username: String
+playerRef.packetHandler: PacketHandler
+
+// Player methods
+player.sendMessage(Message.raw("text"))
+player.sendInventory()
+player.inventory: Inventory?
+
+// Inventory sections
+inventory.hotbar: ItemContainer
+inventory.storage: ItemContainer
+inventory.armor: ItemContainer
+inventory.utility: ItemContainer
+inventory.clear()
+inventory.getCombinedEverything(): ItemContainer
+```
+
+## ItemStack
+
+```kotlin
+// Create
+ItemStack("itemId")
+ItemStack("itemId", quantity)
+ItemStack("itemId", quantity, durability, maxDurability, metadata)
+ItemStack.EMPTY
+
+// Properties
+itemStack.itemId: String
+itemStack.quantity: Int
+itemStack.durability: Double
+itemStack.maxDurability: Double
+
+// State
+itemStack.isEmpty(): Boolean
+itemStack.isBroken(): Boolean
+itemStack.isUnbreakable(): Boolean
+
+// Modify (returns new instance)
+itemStack.withQuantity(n): ItemStack
+itemStack.withDurability(d): ItemStack
+```
+
+## ItemContainer
+
+```kotlin
+container.getItemStack(slot: Short): ItemStack?
+container.setItemStackForSlot(slot: Short, item: ItemStack)
+container.addItemStack(item: ItemStack): Transaction
+container.removeItemStack(item: ItemStack): Transaction
+container.canAddItemStack(item: ItemStack): Boolean
+container.canRemoveItemStack(item: ItemStack): Boolean
+container.forEach { slot, item -> }
+container.countItemStacks { item -> Boolean }: Int
+```
+
+## World
+
+```kotlin
+// Access
+Universe.get().worlds["name"]: World?
+entity.world: World?
+
+// Properties
+world.name: String
+world.tick: Long
+world.isPaused: Boolean
+world.players: Map<UUID, PlayerRef>
+world.entityStore: EntityStore
+world.chunkStore: ChunkStore
+world.worldConfig: WorldConfig
+
+// Methods
+world.execute { }                           // Run on world thread
+world.isInThread(): Boolean
+world.getChunk(x, z): WorldChunk?
+world.getChunkAsync(index): CompletableFuture<WorldChunk>
+```
+
+## Chunk
+
+```kotlin
+chunk.x: Int
+chunk.z: Int
+chunk.getBlockState(localX, y, localZ): BlockState
+chunk.setBlockState(localX, y, localZ, state)
+chunk.setBlock(localX, y, localZ, blockType, rotation)
+chunk.markNeedsSaving()
+```
+
+## Entity
+
+```kotlin
+entity.world: World?
+entity.reference: Ref<EntityStore>?
+entity.toHolder(): Holder<EntityStore>
+entity.remove(): Boolean
+entity.loadIntoWorld(world)
+```
+
+## ECS Access
+
+```kotlin
+// Holder (staging)
+holder.getComponent(ComponentType): T?
+holder.addComponent(ComponentType, component)
+holder.removeComponent(ComponentType)
+
+// Store (direct)
+store.getComponent(ref, ComponentType): T?
+store.putComponent(ref, ComponentType, component)
+store.addEntity(holder, AddReason): Ref
+store.removeEntity(ref, RemoveReason): Holder
+
+// Ref
+ref.isValid(): Boolean
+ref.getStore(): Store
+```
+
+## TransformComponent
+
+```kotlin
+transform.position: Vector3d
+transform.rotation: Vector3f
+transform.chunk: WorldChunk?
+transform.teleportPosition(Vector3d)
+transform.position.assign(x, y, z)
+```
+
+## TaskRegistry / Scheduler
+
+```kotlin
+// Register for auto-cleanup
+taskRegistry.registerTask(future): TaskRegistration
+registration.unregister()
+registration.isRegistered(): Boolean
+
+// Schedule
+HytaleServer.SCHEDULED_EXECUTOR.schedule({ }, delay, TimeUnit)
+HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({ }, initialDelay, period, TimeUnit)
+HytaleServer.SCHEDULED_EXECUTOR.scheduleWithFixedDelay({ }, initialDelay, delay, TimeUnit)
+
+// Cancel
+future.cancel(mayInterrupt: Boolean)
+future.isCancelled(): Boolean
+```
+
+## Message
+
+```kotlin
+Message.raw("text")
+Message.translation("key").param("name", value)
+```
+
+## Common Argument Types
+
+| Type | Value |
+|------|-------|
+| `ArgTypes.BOOLEAN` | true/false |
+| `ArgTypes.INTEGER` | Int |
+| `ArgTypes.FLOAT` | Float |
+| `ArgTypes.DOUBLE` | Double |
+| `ArgTypes.STRING` | String |
+| `ArgTypes.UUID` | UUID |
+| `ArgTypes.PLAYER_REF` | PlayerRef |
+| `ArgTypes.WORLD` | World |
+| `ArgTypes.ITEM_ASSET` | Item |
+| `ArgTypes.BLOCK_TYPE_ASSET` | BlockType |
+| `ArgTypes.RELATIVE_POSITION` | Position (~ for relative) |
+| `ArgTypes.GAME_MODE` | GameMode |
+
+## Event Priority
+
+```
+LOWEST → LOW → NORMAL → HIGH → HIGHEST → MONITOR
+```

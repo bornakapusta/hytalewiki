@@ -1,0 +1,1011 @@
+---
+title: "Capture The Flag Part 4: Game Flow"
+description: Match states, player management, commands, and round lifecycle
+---
+
+**Goal:** Complete the CTF plugin with match flow, commands, and polish.
+
+**Prerequisites:** [Part 3: Scoring](/tutorials/ctf-part3), [Creating Commands](/creating-commands)
+
+**Series:** [Part 1: Flag System](/tutorials/ctf-part1) | [Part 2: Team Bases](/tutorials/ctf-part2) | [Part 3: Scoring](/tutorials/ctf-part3) | Part 4 of 4
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **Match state machine** - WAITING → COUNTDOWN → PLAYING → ENDED transitions
+- **Player lifecycle** - Join, leave, death, and respawn handling
+- **Command implementation** - Player and admin commands
+- **Round management** - Starting, ending, and resetting matches
+
+---
+
+## Match State Machine
+
+CTF matches progress through defined states:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MATCH STATES                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   WAITING ────min players───> COUNTDOWN                     │
+│      ↑                            │                          │
+│      │                            │ 10 seconds               │
+│   player                          ↓                          │
+│   leaves              ┌──> PLAYING <─────┐                  │
+│      │               │        │          │                   │
+│      │       timeout │        │ team     │ reset             │
+│      │               │        │ wins     │                   │
+│      │               │        ↓          │                   │
+│      └───────────────┴─── ENDED ─────────┘                  │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+```kotlin
+enum class MatchState {
+    WAITING,    // Not enough players yet
+    COUNTDOWN,  // Starting soon
+    PLAYING,    // Match in progress
+    ENDED       // Match finished, showing results
+}
+```
+
+---
+
+## Match Manager
+
+Central controller for match flow:
+
+```kotlin
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+
+class MatchManager(
+    private val flagManager: FlagManager,
+    private val baseManager: BaseManager,
+    private val teamManager: TeamManager,
+    private val scoreManager: ScoreManager,
+    private val spawnManager: SpawnManager,
+    private val statsManager: StatsManager
+) {
+    // WHY AtomicReference: State may be checked from multiple threads
+    private val state = AtomicReference(MatchState.WAITING)
+
+    // WHY: Track countdown task to cancel if players leave
+    private var countdownTask: ScheduledFuture<*>? = null
+
+    // WHY: Track match duration for time limit
+    private var matchStartTime: Long = 0
+    private var matchTimeLimit: Long = 15 * 60 * 1000  // 15 minutes
+
+    companion object {
+        const val MIN_PLAYERS_PER_TEAM = 1
+        const val MAX_PLAYERS_PER_TEAM = 8
+        const val COUNTDOWN_SECONDS = 10
+    }
+
+    fun getState(): MatchState = state.get()
+
+    // WHY: Called when player count changes
+    fun checkStateTransitions() {
+        when (state.get()) {
+            MatchState.WAITING -> checkForEnoughPlayers()
+            MatchState.COUNTDOWN -> checkStillEnoughPlayers()
+            MatchState.PLAYING -> checkForTimeLimit()
+            MatchState.ENDED -> { /* Wait for manual reset or auto-reset */ }
+        }
+    }
+
+    private fun checkForEnoughPlayers() {
+        if (hasEnoughPlayers()) {
+            startCountdown()
+        }
+    }
+
+    private fun checkStillEnoughPlayers() {
+        if (!hasEnoughPlayers()) {
+            cancelCountdown()
+        }
+    }
+
+    private fun hasEnoughPlayers(): Boolean {
+        val redCount = teamManager.getTeamSize(Team.RED)
+        val blueCount = teamManager.getTeamSize(Team.BLUE)
+        return redCount >= MIN_PLAYERS_PER_TEAM && blueCount >= MIN_PLAYERS_PER_TEAM
+    }
+}
+```
+
+### Why AtomicReference for State?
+
+```kotlin
+// BAD: Race condition when checking and setting state
+private var state = MatchState.WAITING
+
+fun tryStartCountdown() {
+    if (state == MatchState.WAITING) {  // Thread A checks
+        state = MatchState.COUNTDOWN     // Thread B also saw WAITING, both set
+    }
+}
+
+// GOOD: Atomic compare-and-set
+private val state = AtomicReference(MatchState.WAITING)
+
+fun tryStartCountdown(): Boolean {
+    // WHY: Only succeeds if state was WAITING, fails if another thread changed it
+    return state.compareAndSet(MatchState.WAITING, MatchState.COUNTDOWN)
+}
+```
+
+---
+
+## Countdown Logic
+
+```kotlin
+// Add to MatchManager
+
+private fun startCountdown() {
+    // WHY: Atomic transition prevents double countdown
+    if (!state.compareAndSet(MatchState.WAITING, MatchState.COUNTDOWN)) {
+        return  // Another thread already started countdown
+    }
+
+    broadcastToAll(Message.raw("§eCTF match starting in $COUNTDOWN_SECONDS seconds!"))
+
+    // WHY: Store task reference to cancel if needed
+    countdownTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate(
+        object : Runnable {
+            private var secondsLeft = COUNTDOWN_SECONDS
+
+            override fun run() {
+                when {
+                    secondsLeft > 0 -> {
+                        // Announce at key intervals
+                        if (secondsLeft <= 5 || secondsLeft == 10) {
+                            broadcastToAll(Message.raw("§e$secondsLeft..."))
+                        }
+                        secondsLeft--
+                    }
+                    else -> {
+                        // Countdown finished - start match
+                        countdownTask?.cancel(false)
+                        countdownTask = null
+                        startMatch()
+                    }
+                }
+            }
+        },
+        0,
+        1,
+        TimeUnit.SECONDS
+    )
+}
+
+private fun cancelCountdown() {
+    // WHY: Can only cancel if actually in countdown
+    if (!state.compareAndSet(MatchState.COUNTDOWN, MatchState.WAITING)) {
+        return
+    }
+
+    countdownTask?.cancel(false)
+    countdownTask = null
+
+    broadcastToAll(Message.raw("§cCountdown cancelled - not enough players!"))
+}
+```
+
+---
+
+## Match Start and End
+
+```kotlin
+// Add to MatchManager
+
+private fun startMatch() {
+    state.set(MatchState.PLAYING)
+    matchStartTime = System.currentTimeMillis()
+
+    // WHY: Reset any leftover state from previous match
+    scoreManager.reset()
+    flagManager.resetAllFlags()
+
+    // WHY: Teleport all players to spawn points
+    for (player in server.world.players) {
+        val team = teamManager.getTeam(player.uuid) ?: continue
+        spawnManager.spawnPlayer(player)
+        statsManager.initializePlayer(player)
+
+        // Give loadout (would come from config)
+        giveLoadout(player)
+    }
+
+    broadcastToAll(Message.raw("§a=== CTF MATCH STARTED ==="))
+    broadcastToAll(Message.raw("§7First team to ${scoreManager.capturesToWin} captures wins!"))
+}
+
+fun endMatch(winningTeam: Team?) {
+    // WHY: Can only end if playing
+    if (!state.compareAndSet(MatchState.PLAYING, MatchState.ENDED)) {
+        return
+    }
+
+    // Announce result
+    if (winningTeam != null) {
+        val color = if (winningTeam == Team.RED) "§c" else "§9"
+        broadcastToAll(Message.raw("$color=== ${winningTeam.name} TEAM WINS! ==="))
+    } else {
+        broadcastToAll(Message.raw("§7=== MATCH ENDED - DRAW ==="))
+    }
+
+    showEndGameSummary()
+
+    // WHY: Auto-restart after delay
+    HytaleServer.SCHEDULED_EXECUTOR.schedule(
+        { resetMatch() },
+        30,
+        TimeUnit.SECONDS
+    )
+}
+
+private fun resetMatch() {
+    state.set(MatchState.WAITING)
+
+    // Reset all systems
+    scoreManager.reset()
+    flagManager.resetAllFlags()
+
+    // Teleport players to lobby
+    for (player in server.world.players) {
+        teleportToLobby(player)
+    }
+
+    broadcastToAll(Message.raw("§7Match reset. Waiting for players..."))
+
+    // Check if we can immediately start a new countdown
+    checkStateTransitions()
+}
+
+private fun checkForTimeLimit() {
+    val elapsed = System.currentTimeMillis() - matchStartTime
+    if (elapsed >= matchTimeLimit) {
+        // WHY: Determine winner by score
+        val redScore = scoreManager.getScore(Team.RED)
+        val blueScore = scoreManager.getScore(Team.BLUE)
+
+        val winner = when {
+            redScore > blueScore -> Team.RED
+            blueScore > redScore -> Team.BLUE
+            else -> null  // Draw
+        }
+
+        broadcastToAll(Message.raw("§cTime's up!"))
+        endMatch(winner)
+    }
+}
+```
+
+---
+
+## Player Join/Leave Handling
+
+```kotlin
+import com.hytale.server.event.player.PlayerConnectEvent
+import com.hytale.server.event.player.PlayerDisconnectEvent
+
+class PlayerLifecycleListener(
+    private val matchManager: MatchManager,
+    private val teamManager: TeamManager,
+    private val flagManager: FlagManager,
+    private val spawnManager: SpawnManager,
+    private val statsManager: StatsManager
+) : Listener {
+
+    @EventHandler
+    fun onJoin(event: PlayerConnectEvent) {
+        val player = event.player
+
+        when (matchManager.getState()) {
+            MatchState.WAITING, MatchState.COUNTDOWN -> {
+                // WHY: Assign to team with fewer players
+                val team = teamManager.assignToSmallestTeam(player.uuid)
+                player.sendMessage(Message.raw("§aYou joined ${team.name} team!"))
+
+                // Teleport to lobby
+                teleportToLobby(player)
+
+                // Check if we can start
+                matchManager.checkStateTransitions()
+            }
+            MatchState.PLAYING -> {
+                // WHY: Can still join mid-game
+                val team = teamManager.assignToSmallestTeam(player.uuid)
+                player.sendMessage(Message.raw("§aYou joined ${team.name} team!"))
+
+                // Spawn into the match
+                spawnManager.spawnPlayer(player)
+                statsManager.initializePlayer(player)
+            }
+            MatchState.ENDED -> {
+                // WHY: Just wait in lobby
+                player.sendMessage(Message.raw("§7Match ended. New match starting soon..."))
+                teleportToLobby(player)
+            }
+        }
+    }
+
+    @EventHandler
+    fun onLeave(event: PlayerDisconnectEvent) {
+        val player = event.player
+        val playerId = player.uuid
+
+        // WHY: Drop flag if carrying
+        flagManager.dropFlag(playerId, player.position.toBlockPosition())
+
+        // WHY: Remove from team
+        teamManager.removePlayer(playerId)
+
+        // WHY: Check if we need to cancel countdown or end match
+        matchManager.checkStateTransitions()
+
+        // WHY: Check if a team is now empty (forfeit)
+        checkForForfeit()
+    }
+
+    private fun checkForForfeit() {
+        if (matchManager.getState() != MatchState.PLAYING) return
+
+        val redCount = teamManager.getTeamSize(Team.RED)
+        val blueCount = teamManager.getTeamSize(Team.BLUE)
+
+        when {
+            redCount == 0 && blueCount == 0 -> {
+                // Everyone left
+                matchManager.endMatch(null)
+            }
+            redCount == 0 -> {
+                broadcastToAll(Message.raw("§cRed team forfeited!"))
+                matchManager.endMatch(Team.BLUE)
+            }
+            blueCount == 0 -> {
+                broadcastToAll(Message.raw("§9Blue team forfeited!"))
+                matchManager.endMatch(Team.RED)
+            }
+        }
+    }
+}
+```
+
+### Why Handle Mid-Game Joins?
+
+```kotlin
+// OPTION 1: No mid-game joins
+// Problems:
+// - Long matches with no way to replace disconnected players
+// - Small team disadvantage compounds (3v5 is unfair)
+// - Players who want to play must wait for next match
+
+// OPTION 2: Allow mid-game joins
+// Benefits:
+// - Teams can recover from disconnects
+// - Always players in the action
+// - More dynamic gameplay
+
+// WHY we allow it:
+// CTF is about team objectives, not individual records.
+// A new player helping their team capture is good gameplay.
+// They start with 0 stats anyway, so no unfair advantage.
+```
+
+---
+
+## Death and Respawn
+
+```kotlin
+class DeathHandler(
+    private val matchManager: MatchManager,
+    private val spawnManager: SpawnManager,
+    private val flagManager: FlagManager,
+    private val teamManager: TeamManager
+) : Listener {
+
+    companion object {
+        const val RESPAWN_DELAY_SECONDS = 5L
+    }
+
+    @EventHandler
+    fun onDeath(event: EntityDeathEvent) {
+        val victim = event.entity
+        if (victim !is Player) return
+
+        // Only handle during match
+        if (matchManager.getState() != MatchState.PLAYING) return
+
+        // WHY: Drop flag immediately
+        flagManager.dropFlag(victim.uuid, victim.position.toBlockPosition())
+
+        // WHY: Announce death
+        announceDeath(victim)
+
+        // WHY: Schedule respawn (don't respawn instantly)
+        scheduleRespawn(victim)
+    }
+
+    private fun announceDeath(victim: Player) {
+        val holder = victim.entity as? ComponentHolder<EntityStore>
+        val deathComp = holder?.getComponent(DeathComponent.TYPE)
+
+        val killerId = deathComp?.killerId
+        if (killerId != null) {
+            val killer = findPlayerByUuid(killerId)
+            if (killer != null) {
+                broadcastToAll(Message.raw("§c${killer.name} §7killed §c${victim.name}"))
+            }
+        } else {
+            broadcastToAll(Message.raw("§c${victim.name} §7died"))
+        }
+    }
+
+    private fun scheduleRespawn(player: Player) {
+        player.sendMessage(Message.raw("§7Respawning in ${RESPAWN_DELAY_SECONDS} seconds..."))
+
+        HytaleServer.SCHEDULED_EXECUTOR.schedule(
+            {
+                // WHY: Check player still online and match still going
+                if (player.isOnline && matchManager.getState() == MatchState.PLAYING) {
+                    spawnManager.spawnPlayer(player)
+                    player.sendMessage(Message.raw("§aRespawned!"))
+                }
+            },
+            RESPAWN_DELAY_SECONDS,
+            TimeUnit.SECONDS
+        )
+    }
+}
+```
+
+### Why Respawn Delay?
+
+```kotlin
+// Instant respawn problems:
+// 1. No consequence for dying
+// 2. Defender dies, instantly respawns on flag carrier
+// 3. No tension - death means nothing
+
+// Delayed respawn benefits:
+// 1. Death matters - team is down a player
+// 2. Creates numerical advantages worth pursuing
+// 3. Flag carrier has time to escape
+// 4. Strategic timing of engagements
+
+// 5 seconds is standard:
+// - Short enough to not be frustrating
+// - Long enough to matter in a fight
+```
+
+---
+
+## Commands
+
+```kotlin
+import com.hytale.server.command.AbstractPlayerCommand
+import com.hytale.server.command.AbstractCommandCollection
+
+class CTFCommands(
+    private val matchManager: MatchManager,
+    private val teamManager: TeamManager,
+    private val statsManager: StatsManager,
+    private val scoreboardManager: ScoreboardManager
+) : AbstractCommandCollection("ctf", "CTF commands") {
+
+    init {
+        // WHY: Register all subcommands
+        registerSubCommand(JoinCommand())
+        registerSubCommand(LeaveCommand())
+        registerSubCommand(StatsCommand())
+        registerSubCommand(TeamsCommand())
+
+        // Admin commands
+        registerSubCommand(StartCommand())
+        registerSubCommand(EndCommand())
+        registerSubCommand(ResetCommand())
+    }
+
+    // /ctf join [team]
+    inner class JoinCommand : AbstractPlayerCommand("join", "Join the CTF match") {
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            val player = playerRef.player
+
+            // WHY: Check if already on a team
+            if (teamManager.getTeam(player.uuid) != null) {
+                context.sendMessage(Message.raw("§cYou're already in the match!"))
+                return
+            }
+
+            // WHY: Parse optional team argument
+            val args = context.arguments
+            val requestedTeam = if (args.isNotEmpty()) {
+                try {
+                    Team.valueOf(args[0].uppercase())
+                } catch (e: IllegalArgumentException) {
+                    null
+                }
+            } else null
+
+            // WHY: Try to join requested team, or auto-assign
+            val team = if (requestedTeam != null && teamManager.canJoinTeam(requestedTeam)) {
+                teamManager.assignToTeam(player.uuid, requestedTeam)
+                requestedTeam
+            } else {
+                teamManager.assignToSmallestTeam(player.uuid)
+            }
+
+            context.sendMessage(Message.raw("§aYou joined ${team.name} team!"))
+            matchManager.checkStateTransitions()
+        }
+    }
+
+    // /ctf leave
+    inner class LeaveCommand : AbstractPlayerCommand("leave", "Leave the CTF match") {
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            val player = playerRef.player
+
+            if (teamManager.getTeam(player.uuid) == null) {
+                context.sendMessage(Message.raw("§cYou're not in a match!"))
+                return
+            }
+
+            teamManager.removePlayer(player.uuid)
+            context.sendMessage(Message.raw("§eYou left the match."))
+            matchManager.checkStateTransitions()
+        }
+    }
+
+    // /ctf stats [player]
+    inner class StatsCommand : AbstractPlayerCommand("stats", "View your CTF stats") {
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            val player = playerRef.player
+            val stats = statsManager.getStats(player)
+
+            if (stats == null) {
+                context.sendMessage(Message.raw("§cNo stats available. Join a match first!"))
+                return
+            }
+
+            context.sendMessage(Message.raw("§6=== Your CTF Stats ==="))
+            context.sendMessage(Message.raw("§7Captures: §f${stats.captures.get()}"))
+            context.sendMessage(Message.raw("§7Returns: §f${stats.returns.get()}"))
+            context.sendMessage(Message.raw("§7Kills: §f${stats.kills.get()}"))
+            context.sendMessage(Message.raw("§7Deaths: §f${stats.deaths.get()}"))
+            context.sendMessage(Message.raw("§7K/D Ratio: §f${String.format("%.2f", stats.kdr)}"))
+        }
+    }
+
+    // /ctf teams
+    inner class TeamsCommand : AbstractPlayerCommand("teams", "View team rosters") {
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            context.sendMessage(Message.raw("§6=== Teams ==="))
+
+            for (team in Team.values()) {
+                val players = teamManager.getPlayersOnTeam(team)
+                val color = if (team == Team.RED) "§c" else "§9"
+                val names = players.mapNotNull { findPlayerByUuid(it)?.name }
+                    .joinToString(", ")
+                    .ifEmpty { "(empty)" }
+
+                context.sendMessage(Message.raw("$color${team.name}: §f$names"))
+            }
+        }
+    }
+
+    // /ctf start (admin)
+    inner class StartCommand : AbstractPlayerCommand("start", "Force start the match") {
+        init {
+            requirePermission("ctf.admin")  // WHY: Only admins can force start
+        }
+
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            if (matchManager.getState() != MatchState.WAITING &&
+                matchManager.getState() != MatchState.COUNTDOWN) {
+                context.sendMessage(Message.raw("§cMatch already in progress!"))
+                return
+            }
+
+            matchManager.forceStart()
+            context.sendMessage(Message.raw("§aForce starting match..."))
+        }
+    }
+
+    // /ctf end (admin)
+    inner class EndCommand : AbstractPlayerCommand("end", "Force end the match") {
+        init {
+            requirePermission("ctf.admin")
+        }
+
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            if (matchManager.getState() != MatchState.PLAYING) {
+                context.sendMessage(Message.raw("§cNo match in progress!"))
+                return
+            }
+
+            matchManager.endMatch(null)  // null = no winner (admin ended)
+            context.sendMessage(Message.raw("§aMatch ended by admin."))
+        }
+    }
+
+    // /ctf reset (admin)
+    inner class ResetCommand : AbstractPlayerCommand("reset", "Reset the match") {
+        init {
+            requirePermission("ctf.admin")
+        }
+
+        override fun execute(
+            context: CommandContext,
+            store: Store<EntityStore>,
+            ref: Ref<EntityStore>,
+            playerRef: PlayerRef
+        ) {
+            matchManager.resetMatch()
+            context.sendMessage(Message.raw("§aMatch reset."))
+        }
+    }
+}
+```
+
+---
+
+## Force Start (Admin)
+
+```kotlin
+// Add to MatchManager
+
+fun forceStart() {
+    // WHY: Cancel any existing countdown
+    countdownTask?.cancel(false)
+    countdownTask = null
+
+    // WHY: Force transition regardless of player count
+    state.set(MatchState.PLAYING)
+
+    startMatch()
+}
+```
+
+---
+
+## End Game Summary
+
+```kotlin
+// Add to MatchManager
+
+private fun showEndGameSummary() {
+    val redScore = scoreManager.getScore(Team.RED)
+    val blueScore = scoreManager.getScore(Team.BLUE)
+
+    broadcastToAll(Message.raw(""))
+    broadcastToAll(Message.raw("§6=== FINAL SCORE ==="))
+    broadcastToAll(Message.raw("§cRED: $redScore §7| §9BLUE: $blueScore"))
+    broadcastToAll(Message.raw(""))
+
+    // Top 3 players
+    broadcastToAll(Message.raw("§e--- Top Players ---"))
+    val topPlayers = getTopPlayers(3)
+    for ((index, summary) in topPlayers.withIndex()) {
+        val medal = when (index) {
+            0 -> "§6\u2B50"  // Gold star
+            1 -> "§7\u2B50"  // Silver star
+            2 -> "§c\u2B50"  // Bronze star
+            else -> ""
+        }
+        val teamColor = if (summary.team == Team.RED) "§c" else "§9"
+        broadcastToAll(Message.raw(
+            "$medal $teamColor${summary.name}§f: " +
+            "${summary.captures} caps, ${summary.kills}/${summary.deaths} K/D"
+        ))
+    }
+
+    // Best in category
+    broadcastToAll(Message.raw(""))
+    broadcastToAll(Message.raw("§d--- Awards ---"))
+
+    getMostCaptures()?.let {
+        broadcastToAll(Message.raw("§7Most Captures: §f${it.name} (${it.captures})"))
+    }
+    getMostKills()?.let {
+        broadcastToAll(Message.raw("§7Most Kills: §f${it.name} (${it.kills})"))
+    }
+    getMostReturns()?.let {
+        broadcastToAll(Message.raw("§7Most Returns: §f${it.name} (${it.returns})"))
+    }
+
+    broadcastToAll(Message.raw(""))
+    broadcastToAll(Message.raw("§7New match in 30 seconds..."))
+}
+
+private fun getTopPlayers(limit: Int): List<PlayerStatsSummary> {
+    return statsManager.getAllPlayerStats()
+        .sortedByDescending { calculateMVPScore(it) }
+        .take(limit)
+}
+
+private fun calculateMVPScore(stats: PlayerStatsSummary): Int {
+    return (stats.captures * 100) +
+           (stats.returns * 50) +
+           (stats.kills * 10) -
+           (stats.deaths * 5)
+}
+
+private fun getMostCaptures(): PlayerStatsSummary? {
+    return statsManager.getAllPlayerStats()
+        .filter { it.captures > 0 }
+        .maxByOrNull { it.captures }
+}
+
+private fun getMostKills(): PlayerStatsSummary? {
+    return statsManager.getAllPlayerStats()
+        .filter { it.kills > 0 }
+        .maxByOrNull { it.kills }
+}
+
+private fun getMostReturns(): PlayerStatsSummary? {
+    return statsManager.getAllPlayerStats()
+        .filter { it.returns > 0 }
+        .maxByOrNull { it.returns }
+}
+```
+
+---
+
+## Complete Plugin
+
+```kotlin
+import com.hytale.server.JavaPlugin
+
+class CTFPlugin : JavaPlugin() {
+
+    // Managers
+    private lateinit var flagManager: FlagManager
+    private lateinit var baseManager: BaseManager
+    private lateinit var teamManager: TeamManager
+    private lateinit var scoreManager: ScoreManager
+    private lateinit var spawnManager: SpawnManager
+    private lateinit var statsManager: StatsManager
+    private lateinit var matchManager: MatchManager
+    private lateinit var scoreboardManager: ScoreboardManager
+
+    // Detectors
+    private lateinit var proximityChecker: FlagProximityChecker
+    private lateinit var captureDetector: CaptureDetector
+
+    override fun onEnable() {
+        initializeManagers()
+        setupBases()
+        registerListeners()
+        registerCommands()
+        startGameLoop()
+
+        println("[CTF] Plugin enabled!")
+    }
+
+    private fun initializeManagers() {
+        flagManager = FlagManager()
+        baseManager = BaseManager()
+        teamManager = TeamManager()
+        scoreManager = ScoreManager().apply { capturesToWin = 3 }
+        spawnManager = SpawnManager(baseManager, teamManager)
+        statsManager = StatsManager(teamManager)
+
+        matchManager = MatchManager(
+            flagManager, baseManager, teamManager,
+            scoreManager, spawnManager, statsManager
+        )
+
+        scoreboardManager = ScoreboardManager(scoreManager, statsManager)
+
+        proximityChecker = FlagProximityChecker(flagManager, teamManager, server.world)
+        captureDetector = CaptureDetector(flagManager, baseManager, scoreManager)
+    }
+
+    private fun setupBases() {
+        // Would typically load from config file
+        val redBase = Base(
+            team = Team.RED,
+            zone = Zone(BlockPosition(80, 60, 80), BlockPosition(120, 80, 120)),
+            captureZone = Zone(BlockPosition(95, 64, 95), BlockPosition(105, 68, 105)),
+            flagPosition = BlockPosition(100, 64, 100),
+            spawnPoints = listOf(
+                BlockPosition(85, 64, 85),
+                BlockPosition(115, 64, 85),
+                BlockPosition(100, 64, 85)
+            )
+        )
+        baseManager.registerBase(redBase)
+        flagManager.initializeFlag(Team.RED, redBase.flagPosition)
+
+        val blueBase = Base(
+            team = Team.BLUE,
+            zone = Zone(BlockPosition(-120, 60, -120), BlockPosition(-80, 80, -80)),
+            captureZone = Zone(BlockPosition(-105, 64, -105), BlockPosition(-95, 68, -95)),
+            flagPosition = BlockPosition(-100, 64, -100),
+            spawnPoints = listOf(
+                BlockPosition(-85, 64, -85),
+                BlockPosition(-115, 64, -85),
+                BlockPosition(-100, 64, -85)
+            )
+        )
+        baseManager.registerBase(blueBase)
+        flagManager.initializeFlag(Team.BLUE, blueBase.flagPosition)
+    }
+
+    private fun registerListeners() {
+        val registry = server.eventRegistry
+
+        registry.register(this, PlayerLifecycleListener(
+            matchManager, teamManager, flagManager, spawnManager, statsManager
+        ))
+        registry.register(this, DeathHandler(
+            matchManager, spawnManager, flagManager, teamManager
+        ))
+        registry.register(this, CombatListener(statsManager, flagManager))
+        registry.register(this, BaseProtectionListener(baseManager))
+    }
+
+    private fun registerCommands() {
+        server.commandRegistry.register(
+            CTFCommands(matchManager, teamManager, statsManager, scoreboardManager)
+        )
+    }
+
+    private fun startGameLoop() {
+        // Main game tick
+        HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate(
+            { gameTick() },
+            0,
+            250,  // 4 times per second
+            TimeUnit.MILLISECONDS
+        )
+
+        // Scoreboard updates
+        scoreboardManager.startScoreboardUpdates()
+    }
+
+    private fun gameTick() {
+        // Only process during active match
+        if (matchManager.getState() != MatchState.PLAYING) return
+
+        flagManager.updateCarrierPositions(server.world)
+        proximityChecker.checkAllPlayers()
+
+        // Check captures and handle wins
+        for (player in server.world.players) {
+            val result = captureDetector.checkPlayerCapture(player, teamManager)
+            if (result == CaptureResult.GAME_WON) {
+                val winningTeam = teamManager.getTeam(player.uuid)
+                matchManager.endMatch(winningTeam)
+                break
+            }
+        }
+
+        // Check time limit
+        matchManager.checkStateTransitions()
+    }
+
+    override fun onDisable() {
+        println("[CTF] Plugin disabled!")
+    }
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. State Transition Without Atomic Check
+
+```kotlin
+// BAD: Check then set (race condition)
+if (state == MatchState.WAITING) {
+    state = MatchState.COUNTDOWN  // Another thread could be here too!
+}
+
+// GOOD: Atomic compare-and-set
+if (state.compareAndSet(MatchState.WAITING, MatchState.COUNTDOWN)) {
+    // Only one thread will succeed
+}
+```
+
+### 2. Not Checking Player Online Before Respawn
+
+```kotlin
+// BAD: Player might have disconnected during delay
+schedule({ spawnPlayer(player) }, 5, SECONDS)  // player might be null!
+
+// GOOD: Check before spawning
+schedule({
+    if (player.isOnline && matchManager.getState() == MatchState.PLAYING) {
+        spawnPlayer(player)
+    }
+}, 5, SECONDS)
+```
+
+### 3. Forgetting to Drop Flag on Disconnect
+
+```kotlin
+// BAD: Player disconnects while carrying flag
+fun onDisconnect(event: PlayerDisconnectEvent) {
+    teamManager.removePlayer(event.player.uuid)
+    // Flag is stuck in CARRIED state forever!
+}
+
+// GOOD: Always handle flag
+fun onDisconnect(event: PlayerDisconnectEvent) {
+    flagManager.dropFlag(event.player.uuid, event.player.position)
+    teamManager.removePlayer(event.player.uuid)
+}
+```
+
+---
+
+## Summary
+
+| Concept | What | Why |
+|---------|------|-----|
+| AtomicReference for state | Thread-safe state machine | Multiple threads access state |
+| compareAndSet | Atomic state transitions | Prevents double transitions |
+| Countdown cancellation | Track ScheduledFuture | Stop countdown if players leave |
+| Mid-game joins | Allow joining during play | Keeps teams balanced |
+| Respawn delay | 5 second wait | Makes death meaningful |
+| Force start | Admin override | Testing and tournaments |
+| End game summary | Stats display | Player satisfaction |
+
+---
+
+## Series Complete!
+
+You now have a fully functional Capture The Flag plugin with:
+- Flag pickup, drop, and return mechanics
+- Team bases with spawn points and protection
+- Score tracking with MVP calculation
+- Full match lifecycle management
+- Player and admin commands
+
+### Possible Extensions
+
+- **Flag carrier debuffs** - Slow movement, glowing effect
+- **Power-ups** - Speed boost, shield pickups on the map
+- **Match history** - Database for tracking long-term stats
+- **Spectator mode** - Watch matches without participating
+- **Custom loadouts** - Class selection before spawning

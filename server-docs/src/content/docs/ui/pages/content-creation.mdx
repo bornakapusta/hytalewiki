@@ -1,0 +1,121 @@
+---
+title: Content Creation UI
+description: UI components for spawning entities, particles, and importing assets
+---
+
+Components for creating game content including entity spawning, particle effects, and asset importing.
+
+## EntitySpawnPage.ui
+
+**Purpose**: Entity spawner with tabs for NPCs, items, and models
+**Location**: `Pages/EntitySpawnPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#TabNPC` | SecondaryTextButton | NPC tab selector |
+| `#TabItems` | SecondaryTextButton | Items tab selector |
+| `#TabModel` | SecondaryTextButton | Model tab selector |
+| `#NPCContent` | Group | NPC list container |
+| `#NPCList` | Group | Scrollable NPC list |
+| `#ItemsContent` | Group | Items spawning UI |
+| `#ItemMaterialSlot` | ItemGrid | Material item slot |
+| `#ClearMaterial` | SecondaryTextButton | Clear selected material |
+| `#ModelContent` | Group | Model list container |
+| `#ModelList` | Group | Scrollable model list |
+| `#SelectedName` | Label | Selected entity name |
+| `#RotationOffset` | Slider | Rotation adjustment (-180 to 180) |
+| `#ScaleSlider` | FloatSlider | Scale adjustment (0.1 to 5.0) |
+| `#ScaleValue` | Label | Current scale display |
+| `#Count` | NumberField | Spawn count (1-100) |
+| `#Spawn` | TextButton | Spawn action button |
+
+```ui
+$C.@Container {
+  Anchor: (Left: 50, Top: 170, Width: 450, Bottom: 120);
+
+  #Content {
+    // Tab buttons
+    Group {
+      LayoutMode: Left;
+
+      $C.@SecondaryTextButton #TabNPC { Text: %server.customUI.entitySpawnPage.tab.npc; }
+      $C.@SecondaryTextButton #TabItems { Text: %server.customUI.entitySpawnPage.tab.items; }
+      $C.@SecondaryTextButton #TabModel { Text: %server.customUI.entitySpawnPage.tab.model; }
+    }
+
+    // Settings panel
+    Group {
+      Background: (TexturePath: "../Common/ContainerPanelPatch.png", Border: 4);
+
+      Group #RotationGroup {
+        Slider #RotationOffset {
+          Style: $C.@DefaultSliderStyle;
+          Min: -180; Max: 180; Step: 1;
+        }
+      }
+
+      Group #ScaleGroup {
+        FloatSlider #ScaleSlider {
+          Style: $C.@DefaultSliderStyle;
+          Min: 0.1; Max: 5.0; Step: 0.1; Value: 1.0;
+        }
+      }
+    }
+
+    $C.@TextButton #Spawn { Text: %server.customUI.entitySpawnPage.spawn; }
+  }
+}
+```
+
+## ParticleSpawnPage.ui
+
+**Purpose**: Particle effect spawner interface
+**Location**: `Pages/ParticleSpawnPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ParticleList` | Group | Available particles list |
+| `#SearchInput` | TextField | Particle search |
+| `#SpawnButton` | TextButton | Spawn action |
+
+Interface for browsing and spawning particle effects in the world.
+
+## ScriptedBrushListPage.ui
+
+**Purpose**: Scripted brush selection for terrain editing
+**Location**: `Pages/ScriptedBrushListPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#BrushList` | Group | Available brushes list |
+| `#SearchInput` | TextField | Brush search |
+
+Lists available scripted brushes for terrain modification tools.
+
+## ObjImportPage.ui
+
+**Purpose**: OBJ file import dialog
+**Location**: `Pages/ObjImportPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#PathInput` | TextField | File path input |
+| `#BrowseButton` | SecondaryTextButton | Browse for file |
+| `#ImportButton` | TextButton | Import action |
+| `#StatusLabel` | Label | Import status |
+
+Dialog for importing 3D OBJ model files into the game.
+
+## ImageImportPage.ui
+
+**Purpose**: Image file import dialog
+**Location**: `Pages/ImageImportPage.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#PathInput` | TextField | File path input |
+| `#BrowseButton` | SecondaryTextButton | Browse for file |
+| `#Preview` | Group | Image preview |
+| `#ImportButton` | TextButton | Import action |
+
+Dialog for importing image files with preview functionality.

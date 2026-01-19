@@ -1,0 +1,708 @@
+---
+title: "PVP Arena Part 1: Arena Core"
+description: Foundation, state machine, and player/team tracking
+---
+
+**Goal:** Build a team-based PVP arena plugin with state management and player tracking.
+
+**Prerequisites:** [Handling Events](/handling-events), [Scheduling Tasks](/scheduling-tasks)
+
+**Series:** Part 1 of 4 | [Part 2: Match Flow](/tutorials/pvp-arena-part2) | [Part 3: Combat](/tutorials/pvp-arena-part3) | [Part 4: Commands](/tutorials/pvp-arena-part4)
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **State machines** - Why games need explicit states and how to implement them
+- **Thread-safe collections** - Why `ConcurrentHashMap` matters in event-driven code
+- **Manager pattern** - How to organize complex game logic into maintainable pieces
+- **Team balancing** - Simple algorithms for fair player distribution
+
+---
+
+## Step 1: Understanding State Machines
+
+Every multiplayer game mode needs to track "what phase are we in?" This is called a **state machine**.
+
+### Why Do We Need States?
+
+Consider what happens without explicit states:
+
+```kotlin
+// BAD: No state tracking
+fun onPlayerJoin(player: PlayerRef) {
+    assignTeam(player)        // What if match already started?
+    teleportToLobby(player)   // What if they should go to spawn?
+}
+
+fun onPlayerDeath(player: PlayerRef) {
+    respawnPlayer(player)     // What if match is over?
+}
+```
+
+**Problems:**
+- Players joining mid-match get assigned to teams (unfair!)
+- Deaths trigger respawns even after match ends
+- No way to know when to start countdown
+
+### The Solution: Explicit States
+
+```kotlin
+/**
+ * The arena's lifecycle stages.
+ *
+ * WHY THESE SPECIFIC STATES?
+ * - WAITING: Need time to gather players before starting
+ * - COUNTDOWN: Gives players time to prepare (fair start)
+ * - PLAYING: The actual match
+ * - ENDED: Cleanup time before reset
+ *
+ * Each state has clear entry/exit conditions and allowed actions.
+ */
+enum class ArenaState {
+    WAITING,    // Lobby phase - accepting new players
+    COUNTDOWN,  // Starting soon - no new players
+    PLAYING,    // Match active - combat enabled
+    ENDED       // Match finished - showing results
+}
+```
+
+### State Transitions
+
+```
+┌─────────────────────────────────────────────────────┐
+│                                                     │
+│  WAITING ──(min players)──► COUNTDOWN               │
+│     ▲                           │                   │
+│     │                     (timer done)              │
+│     │                           ▼                   │
+│  (reset)◄──── ENDED ◄──── PLAYING                  │
+│                         (win condition)             │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key insight:** State machines make code predictable. When you're in WAITING, you know exactly what can happen (players join/leave, countdown starts). When you're in PLAYING, you know combat is enabled.
+
+---
+
+## Step 2: Designing the Configuration
+
+Before writing code, think about what should be configurable.
+
+### Why Configuration Matters
+
+Hardcoded values cause problems:
+
+```kotlin
+// BAD: Magic numbers scattered in code
+if (players.size >= 2) { ... }  // Why 2? What if we want 4v4?
+schedule(10, SECONDS) { ... }   // Why 10? Can't change without recompiling
+```
+
+### Creating a Config Class
+
+```kotlin
+import org.joml.Vector3d
+
+/**
+ * All arena settings in one place.
+ *
+ * WHY A DATA CLASS?
+ * - Immutable by default (val) - settings don't change mid-game
+ * - Easy to serialize to JSON/YAML for config files
+ * - Copy function for testing variations
+ * - Clear documentation of all options
+ *
+ * WHY DEFAULTS?
+ * - Plugin works out-of-box with sensible values
+ * - Only override what you need to customize
+ */
+data class ArenaConfig(
+    // Match settings
+    val name: String = "Arena",
+    val minPlayers: Int = 2,        // Minimum to start
+    val maxPlayers: Int = 10,       // Maximum allowed
+    val countdownSeconds: Int = 10, // Pre-match countdown
+    val roundDurationSeconds: Int = 300, // 5 minutes
+
+    // Spawn points
+    val lobbySpawn: Vector3d = Vector3d(0.0, 100.0, 0.0),
+    val teamSpawns: Map<Team, Vector3d> = mapOf(
+        Team.RED to Vector3d(50.0, 100.0, 0.0),
+        Team.BLUE to Vector3d(-50.0, 100.0, 0.0)
+    )
+)
+```
+
+**Teaching moment:** Good configuration design lets server admins customize your plugin without modifying code. Think about what they might want to change.
+
+---
+
+## Step 3: Defining Teams
+
+```kotlin
+/**
+ * Teams in the arena.
+ *
+ * WHY AN ENUM?
+ * - Type safety: Can't accidentally use "rad" instead of RED
+ * - Exhaustive matching: Compiler warns if you miss a case in `when`
+ * - IDE support: Autocomplete shows all options
+ *
+ * WHY INCLUDE SPECTATOR?
+ * - Players who die might become spectators
+ * - Admins might want to watch without playing
+ * - Provides a "neutral" state for players between matches
+ */
+enum class Team(val displayName: String, val color: String) {
+    RED("Red Team", "red"),
+    BLUE("Blue Team", "blue"),
+    SPECTATOR("Spectators", "gray");
+
+    companion object {
+        /**
+         * Teams that actually fight.
+         * Spectator is excluded because they don't participate in combat.
+         */
+        val playingTeams = listOf(RED, BLUE)
+    }
+}
+```
+
+---
+
+## Step 4: Understanding Thread Safety
+
+This is **critical** for Hytale plugins. Events can fire from multiple threads simultaneously.
+
+### The Problem
+
+```kotlin
+// DANGEROUS: Regular HashMap
+private val players = HashMap<UUID, Team>()
+
+// Thread A: Player joins
+players[uuid1] = Team.RED
+
+// Thread B: Different player joins AT THE SAME TIME
+players[uuid2] = Team.BLUE
+
+// Possible outcomes:
+// 1. Both work (lucky)
+// 2. One overwrites the other (data loss)
+// 3. HashMap internal corruption (crash later)
+// 4. ConcurrentModificationException (crash now)
+```
+
+### The Solution: ConcurrentHashMap
+
+```kotlin
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Thread-safe player tracking.
+ *
+ * WHY ConcurrentHashMap?
+ * - Multiple threads can read/write simultaneously without corruption
+ * - No explicit locking needed (it handles this internally)
+ * - Better performance than synchronized HashMap
+ *
+ * WHEN DO YOU NEED THIS?
+ * - Any data accessed from event handlers
+ * - Any data accessed from scheduled tasks
+ * - Any data that might be read while being written
+ *
+ * Rule of thumb: If in doubt, use ConcurrentHashMap.
+ */
+private val playerTeams = ConcurrentHashMap<UUID, Team>()
+```
+
+### Visual Explanation
+
+```
+Without ConcurrentHashMap:
+─────────────────────────────────────────
+Thread A: read -> modify -> write
+Thread B:    read -> modify -> write
+                     ↑
+                  CONFLICT! Thread B's read sees stale data
+
+With ConcurrentHashMap:
+─────────────────────────────────────────
+Thread A: [atomic read-modify-write]
+Thread B:                           [atomic read-modify-write]
+                                    ↑
+                                 SAFE! Operations don't overlap
+```
+
+---
+
+## Step 5: Building the Arena Manager
+
+Now let's combine everything into a manager class.
+
+### Why a Separate Manager?
+
+```kotlin
+// BAD: Everything in the plugin class
+class ArenaPlugin : JavaPlugin {
+    private val players = ...
+    private val state = ...
+    private val scores = ...
+    // 500 lines of mixed concerns
+}
+
+// GOOD: Separate manager
+class ArenaPlugin : JavaPlugin {
+    val arenaManager = ArenaManager(this)
+    // Plugin only handles lifecycle and events
+}
+
+class ArenaManager {
+    // All arena logic in one focused place
+}
+```
+
+**Benefits:**
+- **Testability**: Can test ArenaManager without running a server
+- **Readability**: Each file has one clear purpose
+- **Reusability**: Could have multiple arenas with multiple managers
+
+### The ArenaManager Class
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Central manager for arena state and players.
+ *
+ * DESIGN PRINCIPLE: Single Source of Truth
+ * - All player/team data lives here
+ * - Other classes ask ArenaManager, never track their own copies
+ * - Prevents inconsistency bugs
+ */
+class ArenaManager(private val plugin: JavaPlugin, val config: ArenaConfig) {
+
+    /**
+     * Current arena state.
+     *
+     * WHY PRIVATE SET?
+     * - External code can READ the state (to check conditions)
+     * - Only ArenaManager can CHANGE the state (controlled transitions)
+     * - Prevents bugs like: someOtherClass.arenaManager.state = PLAYING
+     */
+    var state: ArenaState = ArenaState.WAITING
+        private set
+
+    // Player → Team mapping (thread-safe)
+    private val playerTeams = ConcurrentHashMap<UUID, Team>()
+
+    // Alive players per team (for elimination tracking)
+    private val alivePlayers = ConcurrentHashMap<Team, MutableSet<UUID>>()
+
+    init {
+        // Initialize alive sets for each team
+        // Using ConcurrentHashMap.newKeySet() for thread-safe sets
+        Team.playingTeams.forEach { team ->
+            alivePlayers[team] = ConcurrentHashMap.newKeySet()
+        }
+    }
+```
+
+---
+
+## Step 6: Team Balancing Algorithm
+
+When a player joins, which team should they be on?
+
+### The Problem with Random Assignment
+
+```kotlin
+// BAD: Random teams
+fun assignTeam(): Team = if (Random.nextBoolean()) Team.RED else Team.BLUE
+
+// After 6 players join:
+// RED: 5 players
+// BLUE: 1 player
+// Result: Unfair match!
+```
+
+### The Solution: Balance by Count
+
+```kotlin
+    /**
+     * Add a player to the arena with automatic team balancing.
+     *
+     * WHY THIS APPROACH?
+     * - Fair: Teams stay balanced within 1 player
+     * - Simple: Easy to understand and debug
+     * - Predictable: Same inputs give same outputs
+     *
+     * ALTERNATIVE APPROACHES:
+     * - Skill-based: Balance by player rating (more complex)
+     * - Party-based: Keep friends together (social feature)
+     * - Role-based: Balance healers/tanks (class-based games)
+     */
+    fun addPlayer(playerRef: PlayerRef): Team? {
+        val uuid = playerRef.uuid
+
+        // Already in arena? Return existing team
+        // WHY: Prevents duplicate entries, handles reconnects
+        if (playerTeams.containsKey(uuid)) {
+            return playerTeams[uuid]
+        }
+
+        // Arena full?
+        if (getPlayerCount() >= config.maxPlayers) {
+            sendMessage(playerRef, "Arena is full!")
+            return null
+        }
+
+        // Can only join during WAITING
+        // WHY: Joining mid-match is unfair (no items, wrong position)
+        if (state != ArenaState.WAITING) {
+            sendMessage(playerRef, "Match already in progress!")
+            return null
+        }
+
+        // Find the team with fewer players
+        val team = getSmallestTeam()
+
+        // Record the assignment
+        playerTeams[uuid] = team
+        alivePlayers[team]?.add(uuid)
+
+        broadcast("${playerRef.username} joined ${team.displayName}!")
+        plugin.logger.atInfo().log("${playerRef.username} assigned to $team")
+
+        return team
+    }
+
+    /**
+     * Find the team with the fewest players.
+     *
+     * HOW IT WORKS:
+     * 1. Look at each playing team
+     * 2. Count players on each
+     * 3. Return the one with minimum count
+     *
+     * TIE-BREAKER: First team in list (RED) wins ties.
+     * This is deterministic, which helps with debugging.
+     */
+    private fun getSmallestTeam(): Team {
+        return Team.playingTeams.minByOrNull { getTeamCount(it) } ?: Team.RED
+    }
+```
+
+### Visualization
+
+```
+Player 1 joins: RED=0, BLUE=0 → Assigned to RED (first in list)
+Player 2 joins: RED=1, BLUE=0 → Assigned to BLUE (smaller)
+Player 3 joins: RED=1, BLUE=1 → Assigned to RED (tie, first wins)
+Player 4 joins: RED=2, BLUE=1 → Assigned to BLUE (smaller)
+
+Result: Always balanced within 1 player!
+```
+
+---
+
+## Step 7: Player Removal
+
+Players can leave or disconnect:
+
+```kotlin
+    /**
+     * Remove a player from the arena.
+     *
+     * WHY TRACK REMOVAL?
+     * - Free up their slot for new players
+     * - Update team balance
+     * - Check if their team is now eliminated
+     */
+    fun removePlayer(uuid: UUID) {
+        val team = playerTeams.remove(uuid)
+        if (team != null) {
+            alivePlayers[team]?.remove(uuid)
+            plugin.logger.atInfo().log("Player $uuid removed from $team")
+        }
+        // Note: Caller should check win conditions after removal
+    }
+```
+
+---
+
+## Step 8: State Management
+
+Controlled state transitions:
+
+```kotlin
+    /**
+     * Change the arena state.
+     *
+     * WHY A DEDICATED METHOD?
+     * - Logging: Every transition is recorded
+     * - Validation: Could add checks (can't go PLAYING→WAITING)
+     * - Events: Could fire state change events for other systems
+     *
+     * FUTURE IMPROVEMENT: Add validation
+     * fun setState(newState: ArenaState): Boolean {
+     *     if (!isValidTransition(state, newState)) return false
+     *     // ...
+     * }
+     */
+    fun setState(newState: ArenaState) {
+        val oldState = state
+        state = newState
+        plugin.logger.atInfo().log("Arena state: $oldState → $newState")
+    }
+```
+
+---
+
+## Step 9: Messaging Utilities
+
+Communication is essential in multiplayer:
+
+```kotlin
+    /**
+     * Send a message to one player.
+     */
+    fun sendMessage(playerRef: PlayerRef, message: String) {
+        val player = playerRef.holder?.getComponent(Player.getComponentType())
+        player?.sendMessage(Message.raw(message))
+    }
+
+    /**
+     * Broadcast to all arena players.
+     *
+     * WHY NOT ALL SERVER PLAYERS?
+     * - Only arena participants should see arena messages
+     * - Other players might be in different games/areas
+     * - Reduces spam for unrelated players
+     */
+    fun broadcast(message: String) {
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+
+        world.players.values.forEach { playerRef ->
+            // Only message players in this arena
+            if (playerTeams.containsKey(playerRef.uuid)) {
+                sendMessage(playerRef, message)
+            }
+        }
+    }
+
+    /**
+     * Broadcast to one team only.
+     *
+     * USE CASE: Team-specific information
+     * - "Your team captured the flag!"
+     * - "Teammate eliminated: PlayerName"
+     */
+    fun broadcastToTeam(team: Team, message: String) {
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+
+        world.players.values.forEach { playerRef ->
+            if (playerTeams[playerRef.uuid] == team) {
+                sendMessage(playerRef, "[${team.displayName}] $message")
+            }
+        }
+    }
+```
+
+---
+
+## Step 10: Query Methods
+
+Other systems need to ask about arena state:
+
+```kotlin
+    // Simple queries
+    fun getTeam(uuid: UUID): Team? = playerTeams[uuid]
+    fun getPlayers(): Set<UUID> = playerTeams.keys.toSet()
+    fun getPlayerCount(): Int = playerTeams.size
+
+    fun getPlayersOnTeam(team: Team): Set<UUID> {
+        return playerTeams.filterValues { it == team }.keys
+    }
+
+    fun getTeamCount(team: Team): Int = getPlayersOnTeam(team).size
+
+    // Alive tracking (for elimination modes)
+    fun getAlivePlayers(team: Team): Set<UUID> = alivePlayers[team]?.toSet() ?: emptySet()
+    fun getAliveCount(team: Team): Int = alivePlayers[team]?.size ?: 0
+
+    /**
+     * Reset for next match.
+     *
+     * IMPORTANT: Call this at end of each match!
+     * Otherwise old data persists into next game.
+     */
+    fun reset() {
+        playerTeams.clear()
+        Team.playingTeams.forEach { team ->
+            alivePlayers[team]?.clear()
+        }
+        setState(ArenaState.WAITING)
+    }
+}
+```
+
+---
+
+## Step 11: The Plugin Class
+
+Wire everything together:
+
+```kotlin
+package com.example.arena
+
+import com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent
+import com.hypixel.hytale.server.core.event.events.player.PlayerReadyEvent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+
+/**
+ * Main plugin entry point.
+ *
+ * RESPONSIBILITIES:
+ * - Create and hold managers
+ * - Register event handlers
+ * - Lifecycle (start/shutdown)
+ *
+ * NOT RESPONSIBLE FOR:
+ * - Game logic (that's in managers)
+ * - Direct player manipulation (managers do that)
+ */
+class ArenaPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    lateinit var arenaManager: ArenaManager
+        private set
+
+    override fun setup() {
+        val config = ArenaConfig(
+            name = "Battle Arena",
+            minPlayers = 2,
+            maxPlayers = 10
+        )
+
+        arenaManager = ArenaManager(this, config)
+        registerEvents()
+    }
+
+    /**
+     * Register all event handlers.
+     *
+     * WHY SEPARATE METHOD?
+     * - Keeps setup() clean
+     * - Easy to see all events in one place
+     * - Could be split further for large plugins
+     */
+    private fun registerEvents() {
+        // Player joins and is ready to play
+        eventRegistry.register(PlayerReadyEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            arenaManager.addPlayer(playerRef)
+        }
+
+        // Player disconnects
+        eventRegistry.register(PlayerDisconnectEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            arenaManager.removePlayer(playerRef.uuid)
+        }
+    }
+
+    override fun start() {
+        logger.atInfo().log("ArenaPlugin started - ${arenaManager.config.name}")
+    }
+
+    override fun shutdown() {
+        logger.atInfo().log("ArenaPlugin shutdown")
+    }
+}
+```
+
+---
+
+## Common Mistakes to Avoid
+
+### 1. Forgetting Thread Safety
+
+```kotlin
+// WRONG
+private val players = HashMap<UUID, Team>()
+
+// RIGHT
+private val players = ConcurrentHashMap<UUID, Team>()
+```
+
+### 2. Not Checking State
+
+```kotlin
+// WRONG: Allows join anytime
+fun addPlayer(player: PlayerRef) {
+    playerTeams[player.uuid] = getSmallestTeam()
+}
+
+// RIGHT: Only during appropriate state
+fun addPlayer(player: PlayerRef): Team? {
+    if (state != ArenaState.WAITING) return null
+    // ...
+}
+```
+
+### 3. Hardcoded Values
+
+```kotlin
+// WRONG
+if (players.size >= 2) startCountdown()
+
+// RIGHT
+if (players.size >= config.minPlayers) startCountdown()
+```
+
+### 4. Not Logging State Changes
+
+```kotlin
+// WRONG: Silent state change
+state = ArenaState.PLAYING
+
+// RIGHT: Logged for debugging
+fun setState(newState: ArenaState) {
+    logger.atInfo().log("State: $state → $newState")
+    state = newState
+}
+```
+
+---
+
+## Summary
+
+In this part, you learned:
+
+| Concept | Why It Matters |
+|---------|---------------|
+| State machines | Predictable game flow, prevents invalid actions |
+| ConcurrentHashMap | Thread safety for event-driven code |
+| Configuration class | Customizable without code changes |
+| Manager pattern | Organized, testable, maintainable code |
+| Team balancing | Fair matches keep players engaged |
+
+---
+
+## What's Next
+
+In [Part 2: Match Flow](/tutorials/pvp-arena-part2), we'll add:
+- Automatic countdown when minimum players reached
+- Match start with team teleportation
+- Round timer with warnings
+- Match end and reset sequence
+
+You'll learn about **scheduled tasks** and **game loops**.

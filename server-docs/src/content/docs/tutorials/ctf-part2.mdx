@@ -1,0 +1,645 @@
+---
+title: "Capture The Flag Part 2: Team Bases"
+description: Base zones, spawn points, capture mechanics, and base protection
+---
+
+**Goal:** Implement team bases with spawn points, capture zones, and protection rules.
+
+**Prerequisites:** [Part 1: Flag System](/tutorials/ctf-part1), [Working with Players](/working-with-players)
+
+**Series:** [Part 1: Flag System](/tutorials/ctf-part1) | Part 2 of 4 | [Part 3: Scoring](/tutorials/ctf-part3) | [Part 4: Game Flow](/tutorials/ctf-part4)
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **Zone detection** - Checking if a position is inside a rectangular region
+- **Capture mechanics** - How flag captures trigger
+- **Spawn systems** - Respawning players at their base
+- **Base protection** - Preventing building/breaking in protected areas
+
+---
+
+## Understanding Base Zones
+
+A base is a rectangular region with specific rules:
+
+```
+┌──────────────────────────────────────────────────┐
+│                   RED BASE                        │
+│   ┌─────────────────────────────────────────┐    │
+│   │                                         │    │
+│   │   [S]  [S]  [S]    <- Spawn Points     │    │
+│   │                                         │    │
+│   │          [F]       <- Flag Position    │    │
+│   │                                         │    │
+│   │   [C]              <- Capture Zone     │    │
+│   │                                         │    │
+│   └─────────────────────────────────────────┘    │
+│                                                   │
+└──────────────────────────────────────────────────┘
+
+Rules:
+- Enemy flag carrier enters [C] = CAPTURE!
+- Dead players respawn at random [S]
+- No building/breaking inside base
+```
+
+---
+
+## Zone Data Model
+
+```kotlin
+import com.hytale.server.world.BlockPosition
+
+data class Zone(
+    val min: BlockPosition,  // Corner with smallest x, y, z
+    val max: BlockPosition   // Corner with largest x, y, z
+) {
+    // WHY: Contains check is the most common operation
+    // Making it a method on Zone keeps logic centralized
+    fun contains(position: BlockPosition): Boolean {
+        return position.x >= min.x && position.x <= max.x &&
+               position.y >= min.y && position.y <= max.y &&
+               position.z >= min.z && position.z <= max.z
+    }
+
+    // WHY: Useful for debug logging and config serialization
+    override fun toString(): String {
+        return "Zone(${min.x},${min.y},${min.z} -> ${max.x},${max.y},${max.z})"
+    }
+}
+```
+
+### Why Min/Max Instead of Center/Radius?
+
+```kotlin
+// OPTION A: Center + Radius (spherical)
+data class SphereZone(val center: BlockPosition, val radius: Double) {
+    fun contains(pos: BlockPosition): Boolean {
+        return center.distanceTo(pos) <= radius  // Requires sqrt!
+    }
+}
+
+// OPTION B: Min/Max corners (rectangular)
+data class Zone(val min: BlockPosition, val max: BlockPosition) {
+    fun contains(pos: BlockPosition): Boolean {
+        return pos.x >= min.x && pos.x <= max.x &&
+               pos.y >= min.y && pos.y <= max.y &&
+               pos.z >= min.z && pos.z <= max.z  // Just comparisons!
+    }
+}
+
+// WHY rectangular wins:
+// 1. Faster - only comparisons, no sqrt
+// 2. Matches Minecraft/Hytale world structure (blocks are cubes)
+// 3. Easier to visualize and configure
+// 4. Natural fit for bases (rectangular buildings)
+```
+
+---
+
+## Base Configuration
+
+```kotlin
+data class Base(
+    val team: Team,
+    val zone: Zone,                           // Full base area
+    val captureZone: Zone,                    // Where captures happen
+    val flagPosition: BlockPosition,          // Where flag spawns
+    val spawnPoints: List<BlockPosition>      // Where players respawn
+) {
+    init {
+        // WHY: Fail fast if config is wrong
+        require(spawnPoints.isNotEmpty()) {
+            "Base must have at least one spawn point"
+        }
+        require(zone.contains(flagPosition)) {
+            "Flag position must be inside base zone"
+        }
+        require(zone.contains(captureZone.min) && zone.contains(captureZone.max)) {
+            "Capture zone must be inside base zone"
+        }
+    }
+
+    // WHY: Random spawn prevents spawn camping
+    fun getRandomSpawnPoint(): BlockPosition {
+        return spawnPoints.random()
+    }
+}
+```
+
+### Why Separate `zone` and `captureZone`?
+
+```kotlin
+// BAD: Capture anywhere in base
+if (base.zone.contains(playerPosition)) {
+    capture()  // Too easy! Just need to touch edge of base
+}
+
+// GOOD: Capture only in specific area
+if (base.captureZone.contains(playerPosition)) {
+    capture()  // Must reach the capture point
+}
+
+// WHY separation matters:
+// - Base zone: large area for spawn protection
+// - Capture zone: small area near flag stand
+// - Different gameplay purposes need different boundaries
+```
+
+---
+
+## Base Manager
+
+```kotlin
+import java.util.concurrent.ConcurrentHashMap
+
+class BaseManager {
+    private val bases = ConcurrentHashMap<Team, Base>()
+
+    fun registerBase(base: Base) {
+        bases[base.team] = base
+        println("[CTF] Registered ${base.team} base: ${base.zone}")
+    }
+
+    fun getBase(team: Team): Base? = bases[team]
+
+    // WHY: Multiple checks might need "which base is this position in"
+    fun getBaseAt(position: BlockPosition): Base? {
+        return bases.values.find { it.zone.contains(position) }
+    }
+
+    // WHY: Capture check is separate from "inside base" check
+    fun isInCaptureZone(position: BlockPosition, team: Team): Boolean {
+        val base = bases[team] ?: return false
+        return base.captureZone.contains(position)
+    }
+
+    fun isInsideAnyBase(position: BlockPosition): Boolean {
+        return bases.values.any { it.zone.contains(position) }
+    }
+
+    // WHY: Check if position is in ENEMY base (for capture detection)
+    fun getEnemyBaseIfInCaptureZone(playerTeam: Team, position: BlockPosition): Base? {
+        for ((baseTeam, base) in bases) {
+            if (baseTeam != playerTeam && base.captureZone.contains(position)) {
+                return base
+            }
+        }
+        return null
+    }
+}
+```
+
+---
+
+## Capture Detection
+
+When a flag carrier enters enemy capture zone:
+
+```kotlin
+class CaptureDetector(
+    private val flagManager: FlagManager,
+    private val baseManager: BaseManager,
+    private val scoreManager: ScoreManager
+) {
+    // WHY: Called each game tick after position updates
+    fun checkCaptures(players: Collection<Player>, teamManager: TeamManager) {
+        for (player in players) {
+            checkPlayerCapture(player, teamManager)
+        }
+    }
+
+    private fun checkPlayerCapture(player: Player, teamManager: TeamManager) {
+        val playerId = player.uuid
+        val playerTeam = teamManager.getTeam(playerId) ?: return
+
+        // WHY: Only flag carriers can capture
+        val carriedFlag = flagManager.getFlagCarriedBy(playerId) ?: return
+
+        // WHY: Must be in YOUR team's capture zone
+        val ownBase = baseManager.getBase(playerTeam) ?: return
+
+        if (!ownBase.captureZone.contains(player.position.toBlockPosition())) {
+            return  // Not in capture zone yet
+        }
+
+        // WHY: Your own flag must be at base to capture
+        // This is classic CTF rules - prevents captures when your flag is stolen
+        val ownFlag = flagManager.getFlag(playerTeam)
+        if (ownFlag?.state != FlagState.AT_BASE) {
+            notifyFlagNotHome(player)
+            return
+        }
+
+        // All conditions met - capture!
+        processCapture(player, playerTeam, carriedFlag)
+    }
+
+    private fun processCapture(player: Player, team: Team, flag: Flag) {
+        // WHY: Return enemy flag to their base
+        flagManager.returnFlagToBase(flag)
+
+        // WHY: Award points
+        scoreManager.addCapture(team, player.uuid)
+
+        // Broadcast
+        broadcastCapture(player, team)
+    }
+
+    private fun notifyFlagNotHome(player: Player) {
+        // WHY: Player might not realize why they can't capture
+        player.sendMessage(Message.raw("Your flag must be at base to capture!"))
+    }
+
+    private fun broadcastCapture(player: Player, team: Team) {
+        println("[CTF] ${player.name} captured for ${team.name}!")
+    }
+}
+```
+
+### The "Flag Must Be Home" Rule
+
+```kotlin
+// Classic CTF rule visualization:
+
+// CAN capture:
+// [Your Base]          [Enemy Base]
+//   [Your Flag ✓]        [Empty - you have their flag]
+//   [You + Enemy Flag]
+//   Result: CAPTURE! Score +1
+
+// CANNOT capture:
+// [Your Base]          [Enemy Base]
+//   [Empty - enemy has your flag]   [Enemy + Your Flag]
+//   [You + Enemy Flag]
+//   Result: Must get your flag back first!
+
+// WHY this rule exists:
+// 1. Prevents "trade captures" where both teams score simultaneously
+// 2. Creates "flag defense" as important as flag offense
+// 3. Encourages team coordination (defend AND attack)
+```
+
+---
+
+## Spawn System
+
+```kotlin
+import com.hytale.server.entity.player.Player
+
+class SpawnManager(
+    private val baseManager: BaseManager,
+    private val teamManager: TeamManager
+) {
+    // WHY: Track spawn protection to prevent instant death
+    private val spawnProtection = ConcurrentHashMap<UUID, Long>()
+
+    companion object {
+        const val SPAWN_PROTECTION_MS = 3000L  // 3 seconds of invulnerability
+    }
+
+    fun spawnPlayer(player: Player) {
+        val team = teamManager.getTeam(player.uuid) ?: return
+        val base = baseManager.getBase(team) ?: return
+
+        // WHY: Random spawn point prevents camping
+        val spawnPoint = base.getRandomSpawnPoint()
+
+        // Teleport player
+        teleportToSpawn(player, spawnPoint)
+
+        // Grant spawn protection
+        grantSpawnProtection(player.uuid)
+
+        // Reset player state
+        resetPlayerState(player)
+    }
+
+    private fun teleportToSpawn(player: Player, position: BlockPosition) {
+        // WHY: Add 0.5 to center player on block
+        player.teleport(
+            position.x + 0.5,
+            position.y.toDouble(),
+            position.z + 0.5
+        )
+    }
+
+    private fun grantSpawnProtection(playerId: UUID) {
+        val expiresAt = System.currentTimeMillis() + SPAWN_PROTECTION_MS
+        spawnProtection[playerId] = expiresAt
+
+        // WHY: Schedule removal instead of checking every damage event
+        HytaleServer.SCHEDULED_EXECUTOR.schedule(
+            { spawnProtection.remove(playerId) },
+            SPAWN_PROTECTION_MS,
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    fun hasSpawnProtection(playerId: UUID): Boolean {
+        val expiresAt = spawnProtection[playerId] ?: return false
+        // WHY: Double-check in case scheduled task hasn't run yet
+        return System.currentTimeMillis() < expiresAt
+    }
+
+    private fun resetPlayerState(player: Player) {
+        // WHY: Fresh start on respawn
+        player.health = player.maxHealth
+        // Clear any debuffs, restore hunger, etc.
+    }
+}
+```
+
+### Why Random Spawn Points?
+
+```kotlin
+// BAD: Single spawn point
+val spawnPoint = BlockPosition(100, 64, 100)
+// Enemy learns this, camps it, you die instantly every time
+
+// GOOD: Multiple random spawn points
+val spawnPoints = listOf(
+    BlockPosition(100, 64, 100),
+    BlockPosition(105, 64, 95),
+    BlockPosition(95, 64, 105)
+)
+val spawnPoint = spawnPoints.random()
+// Enemy can't camp all three, gives you a chance
+
+// WHY: Combined with spawn protection, this prevents spawn camping
+// - Random position: enemy can't predict where you'll appear
+// - Spawn protection: even if enemy guesses right, you have time
+```
+
+---
+
+## Base Protection
+
+Prevent block modifications inside bases:
+
+```kotlin
+import com.hytale.server.event.Listener
+import com.hytale.server.event.block.BlockPlaceEvent
+import com.hytale.server.event.block.BreakBlockEvent
+
+class BaseProtectionListener(
+    private val baseManager: BaseManager
+) : Listener {
+
+    @EventHandler
+    fun onBlockPlace(event: BlockPlaceEvent) {
+        val position = event.position
+
+        // WHY: Check if inside any base
+        if (baseManager.isInsideAnyBase(position)) {
+            event.cancel()
+            event.player?.sendMessage(
+                Message.raw("You cannot build inside a base!")
+            )
+        }
+    }
+
+    @EventHandler
+    fun onBlockBreak(event: BreakBlockEvent) {
+        val position = event.position
+
+        if (baseManager.isInsideAnyBase(position)) {
+            event.cancel()
+            event.player?.sendMessage(
+                Message.raw("You cannot break blocks inside a base!")
+            )
+        }
+    }
+}
+```
+
+### Why Protect Bases?
+
+```kotlin
+// Without protection:
+// 1. Player digs tunnel into enemy base
+// 2. Player walls off flag with bedrock
+// 3. Player builds tower to camp spawns
+
+// With protection:
+// - Fair fight every time
+// - Map stays intact
+// - Bases remain accessible
+
+// WHY not just trust players?
+// Even in friendly games, accidents happen.
+// Protection prevents both griefing AND mistakes.
+```
+
+---
+
+## Damage Prevention in Protected Areas
+
+```kotlin
+class CombatProtectionListener(
+    private val baseManager: BaseManager,
+    private val spawnManager: SpawnManager
+) : Listener {
+
+    @EventHandler(priority = EventPriority.HIGH)
+    fun onDamage(event: DamageEvent) {
+        val target = event.target
+        if (target !is Player) return
+
+        // WHY: Check spawn protection first (it's faster)
+        if (spawnManager.hasSpawnProtection(target.uuid)) {
+            event.cancel()
+            return
+        }
+
+        // WHY: Check if target is in their OWN base
+        // Don't protect enemies who invaded your base!
+        val targetTeam = teamManager.getTeam(target.uuid) ?: return
+        val targetBase = baseManager.getBase(targetTeam) ?: return
+
+        if (targetBase.zone.contains(target.position.toBlockPosition())) {
+            // WHY: Only cancel if not carrying enemy flag
+            // Flag carriers are fair game anywhere
+            val carriedFlag = flagManager.getFlagCarriedBy(target.uuid)
+            if (carriedFlag == null) {
+                event.cancel()
+            }
+        }
+    }
+}
+```
+
+### Nuanced Protection Rules
+
+```kotlin
+// Simple rule: No damage in bases
+// Problem: Defender can stand in base and shoot out safely
+
+// Better rule: No damage if:
+// 1. You're in YOUR base (not enemy base)
+// 2. You're NOT carrying enemy flag
+// 3. You have spawn protection
+
+// This means:
+// ✓ Defenders safe in own base
+// ✓ Attackers can fight in enemy base
+// ✓ Flag carriers always vulnerable
+// ✓ Recently spawned players protected briefly
+```
+
+---
+
+## Complete Base Setup
+
+```kotlin
+class CTFPlugin : JavaPlugin() {
+
+    private lateinit var flagManager: FlagManager
+    private lateinit var baseManager: BaseManager
+    private lateinit var teamManager: TeamManager
+    private lateinit var spawnManager: SpawnManager
+    private lateinit var captureDetector: CaptureDetector
+
+    override fun onEnable() {
+        initializeManagers()
+        setupBases()
+        registerListeners()
+        startGameLoop()
+    }
+
+    private fun initializeManagers() {
+        flagManager = FlagManager()
+        baseManager = BaseManager()
+        teamManager = TeamManager()
+        spawnManager = SpawnManager(baseManager, teamManager)
+        captureDetector = CaptureDetector(flagManager, baseManager, scoreManager)
+    }
+
+    private fun setupBases() {
+        // Red base configuration
+        val redBase = Base(
+            team = Team.RED,
+            zone = Zone(
+                min = BlockPosition(80, 60, 80),
+                max = BlockPosition(120, 80, 120)
+            ),
+            captureZone = Zone(
+                min = BlockPosition(95, 64, 95),
+                max = BlockPosition(105, 68, 105)
+            ),
+            flagPosition = BlockPosition(100, 64, 100),
+            spawnPoints = listOf(
+                BlockPosition(85, 64, 85),
+                BlockPosition(115, 64, 85),
+                BlockPosition(100, 64, 85)
+            )
+        )
+        baseManager.registerBase(redBase)
+        flagManager.initializeFlag(Team.RED, redBase.flagPosition)
+
+        // Blue base configuration
+        val blueBase = Base(
+            team = Team.BLUE,
+            zone = Zone(
+                min = BlockPosition(-120, 60, -120),
+                max = BlockPosition(-80, 80, -80)
+            ),
+            captureZone = Zone(
+                min = BlockPosition(-105, 64, -105),
+                max = BlockPosition(-95, 68, -95)
+            ),
+            flagPosition = BlockPosition(-100, 64, -100),
+            spawnPoints = listOf(
+                BlockPosition(-85, 64, -85),
+                BlockPosition(-115, 64, -85),
+                BlockPosition(-100, 64, -85)
+            )
+        )
+        baseManager.registerBase(blueBase)
+        flagManager.initializeFlag(Team.BLUE, blueBase.flagPosition)
+    }
+
+    private fun registerListeners() {
+        server.eventRegistry.register(this, BaseProtectionListener(baseManager))
+        server.eventRegistry.register(this, CombatProtectionListener(baseManager, spawnManager))
+    }
+
+    private fun gameTick() {
+        flagManager.updateCarrierPositions(server.world)
+        captureDetector.checkCaptures(server.world.players, teamManager)
+    }
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. Zone Corners Swapped
+
+```kotlin
+// BAD: Min has larger values than Max
+val zone = Zone(
+    min = BlockPosition(120, 80, 120),  // These are bigger!
+    max = BlockPosition(80, 60, 80)
+)
+// Result: contains() always returns false
+
+// GOOD: Ensure min < max for all coordinates
+val zone = Zone(
+    min = BlockPosition(80, 60, 80),
+    max = BlockPosition(120, 80, 120)
+)
+```
+
+### 2. Forgetting Edge Cases
+
+```kotlin
+// BAD: Teleport to block corner
+player.teleport(100.0, 64.0, 100.0)
+// Player might clip into adjacent block
+
+// GOOD: Center on block
+player.teleport(100.5, 64.0, 100.5)
+// Player cleanly in center of block
+```
+
+### 3. Protection Without Flag Check
+
+```kotlin
+// BAD: Flag carriers safe in own base
+if (playerInOwnBase) {
+    event.cancel()  // Carrier can hide forever with flag!
+}
+
+// GOOD: Check if carrying flag
+if (playerInOwnBase && !isCarryingEnemyFlag(player)) {
+    event.cancel()
+}
+```
+
+---
+
+## Summary
+
+| Concept | What | Why |
+|---------|------|-----|
+| Zone with Min/Max | Rectangular region | Faster than sphere, matches block world |
+| Capture Zone | Subset of base | Requires reaching flag stand, not just base edge |
+| Flag Must Be Home | Can't capture if your flag stolen | Prevents trade captures, encourages defense |
+| Random Spawn | Multiple spawn points | Prevents spawn camping |
+| Spawn Protection | 3 second invulnerability | Gives player time to react after respawn |
+| Base Protection | No build/break | Maintains map integrity |
+
+---
+
+## What's Next
+
+In [Part 3: Scoring](/tutorials/ctf-part3), you'll learn:
+- Score tracking per team
+- Individual player stats (captures, returns, kills)
+- Scoreboard display
+- Win conditions (first to X captures)

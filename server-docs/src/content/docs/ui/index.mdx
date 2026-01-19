@@ -1,0 +1,95 @@
+---
+title: UI System Overview
+description: Documentation for Hytale's custom UI component system
+---
+
+The Hytale UI system uses a declarative DSL (Domain-Specific Language) for defining user interfaces. UI files (`.ui`) describe layouts, styling, and interactive elements that can be displayed to players.
+
+## Architecture
+
+UI components are organized in `Assets/Common/UI/Custom/`:
+
+```
+Custom/
+├── Common.ui          # Shared variables and base components
+├── Sounds.ui          # Sound effect definitions
+├── Common/            # Reusable component templates
+│   ├── TextButton.ui
+│   └── ActionButton.ui
+├── Pages/             # Full-screen page layouts
+│   ├── ShopPage.ui
+│   ├── RespawnPage.ui
+│   └── ...
+└── Hud/               # In-game HUD elements
+    └── TimeLeft.ui
+```
+
+## Quick Links
+
+### Foundation
+- [DSL Syntax Reference](/ui/dsl-syntax) - Learn the UI language
+- [Common.ui Reference](/ui/common-reference) - Shared variables and styles
+- [Sounds.ui Reference](/ui/sounds-reference) - Audio feedback definitions
+
+### UI Pages
+- [Portal & Teleportation](/ui/pages/portal-teleportation) - Portals, teleporters, bullet points
+- [Shop & Trading](/ui/pages/shop-trading) - Shop pages, barter system
+- [Respawn System](/ui/pages/respawn-system) - Death screens, respawn points
+- [Prefab Editing](/ui/pages/prefab-editing) - Prefab editor settings and browser
+- [Admin & Debug](/ui/pages/admin-debug) - Admin panels, plugin lists
+- [Content Creation](/ui/pages/content-creation) - Entity/particle spawning, imports
+- [World & Environment](/ui/pages/world-environment) - Tint, models, launch pads
+- [Navigation & Warping](/ui/pages/navigation-warping) - Warp lists, instance management
+- [Item Management](/ui/pages/item-management) - Item repair system
+- [Memories](/ui/pages/memories) - Memory collection UI
+
+### Components
+- [Reusable Elements](/ui/components/reusable-elements) - Buttons, cards, shared components
+
+### HUD
+- [Time Left](/ui/hud/time-left) - Timer display element
+
+## Basic Example
+
+A simple page using the container system:
+
+```ui
+$C = "../Common.ui";
+
+$C.@PageOverlay {}
+
+$C.@Container {
+  Anchor: (Width: 600, Height: 400);
+
+  #Title {
+    $C.@Title {
+      @Text = "My Page";
+    }
+  }
+
+  #Content {
+    LayoutMode: Top;
+
+    Label {
+      Text: "Hello, World!";
+      Style: $C.@DefaultLabelStyle;
+    }
+
+    $C.@TextButton {
+      @Text = "Click Me";
+    }
+  }
+}
+
+$C.@BackButton {}
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `$Variable` | File import reference |
+| `@Variable` | Local/component variable |
+| `#ElementId` | Element identifier for scripting |
+| `%localization.key` | Localized text reference |
+| `...@Spread` | Property spread operator |

@@ -1,0 +1,331 @@
+---
+title: Common.ui Reference
+description: Reference for shared UI variables, styles, and components in Common.ui
+---
+
+`Common.ui` provides the foundational variables, styles, and component templates used across all UI files.
+
+## Importing
+
+```ui
+$C = "../Common.ui";
+// or from deeper paths:
+$C = "../../Common.ui";
+```
+
+## Panels & Containers
+
+### @Panel
+Basic panel with background.
+
+```ui
+@Panel = Group {
+  Background: (TexturePath: "Common/ContainerFullPatch.png", Border: 20);
+};
+```
+
+### @Container
+Standard page container with title and content areas.
+
+| Slot | Description |
+|------|-------------|
+| `#Title` | Header section |
+| `#Content` | Main content area |
+| `#CloseButton` | Optional close button |
+
+```ui
+$C.@Container {
+  @CloseButton = true;  // Enable close button
+  Anchor: (Width: 600, Height: 400);
+
+  #Title {
+    $C.@Title { @Text = "My Title"; }
+  }
+
+  #Content {
+    LayoutMode: Top;
+    // Content here
+  }
+}
+```
+
+### @DecoratedContainer
+Container with decorative top/bottom ornaments.
+
+```ui
+$C.@DecoratedContainer {
+  Anchor: (Width: 700, Height: 500);
+  // Same slots as @Container
+}
+```
+
+### @PageOverlay
+Semi-transparent background overlay for modals.
+
+```ui
+$C.@PageOverlay {
+  LayoutMode: Middle;
+  // Container goes here
+}
+```
+
+## Buttons
+
+### Size Constants
+
+| Variable | Value |
+|----------|-------|
+| `@PrimaryButtonHeight` | 44 |
+| `@SmallButtonHeight` | 32 |
+| `@BigButtonHeight` | 48 |
+| `@ButtonPadding` | 24 |
+| `@DefaultButtonMinWidth` | 172 |
+
+### Button Components
+
+| Component | Description |
+|-----------|-------------|
+| `@TextButton` | Primary button with text |
+| `@SecondaryTextButton` | Secondary styled button |
+| `@TertiaryTextButton` | Tertiary styled button |
+| `@CancelTextButton` | Red destructive button |
+| `@SmallSecondaryTextButton` | Smaller secondary button |
+| `@SmallTertiaryTextButton` | Smaller tertiary button |
+
+```ui
+$C.@TextButton {
+  @Text = "Primary Action";
+  @Anchor = (Width: 200);
+}
+
+$C.@SecondaryTextButton {
+  @Text = "Secondary";
+}
+
+$C.@CancelTextButton {
+  @Text = "Delete";
+}
+```
+
+### Button Styles
+
+| Style | Description |
+|-------|-------------|
+| `@DefaultButtonStyle` | Primary button visual style |
+| `@SecondaryButtonStyle` | Secondary button visual style |
+| `@TertiaryButtonStyle` | Tertiary button visual style |
+| `@CancelButtonStyle` | Destructive action style |
+
+### Label Styles for Buttons
+
+| Style | Description |
+|-------|-------------|
+| `@DefaultButtonLabelStyle` | Primary button text |
+| `@SecondaryButtonLabelStyle` | Secondary button text |
+| `@SmallButtonLabelStyle` | Smaller button text |
+
+## Input Fields
+
+### @TextField
+Text input field.
+
+```ui
+$C.@TextField #NameInput {
+  @Anchor = (Width: 300);
+  PlaceholderText: "Enter text...";
+}
+```
+
+### @NumberField
+Numeric input with optional formatting.
+
+```ui
+$C.@NumberField #CountInput {
+  @Anchor = (Width: 100);
+  Format: (MaxDecimalPlaces: 0, Step: 1);
+}
+```
+
+### @DropdownBox
+Selection dropdown.
+
+```ui
+$C.@DropdownBox #TypeSelector {
+  @Anchor = (Width: 200);
+}
+```
+
+### @CheckBox
+Boolean toggle.
+
+```ui
+$C.@CheckBox #EnableOption {
+  Value: true;
+}
+```
+
+### @CheckBoxWithLabel
+Checkbox with text label.
+
+```ui
+$C.@CheckBoxWithLabel {
+  @Text = "Enable feature";
+  @Checked = false;
+}
+```
+
+## Typography
+
+### Label Styles
+
+| Style | Description |
+|-------|-------------|
+| `@DefaultLabelStyle` | Standard label (16px, #96a9be) |
+| `@TitleStyle` | Section titles (15px, bold, uppercase) |
+| `@SubtitleStyle` | Subtitles (15px, uppercase) |
+| `@PopupTitleStyle` | Large popup headers (38px) |
+
+### Title Components
+
+```ui
+$C.@Title {
+  @Text = "Page Title";
+  @Alignment = Center;  // or Start, End
+}
+
+$C.@TitleLabel {
+  // Pre-styled large centered label
+}
+
+$C.@Subtitle {
+  @Text = "Subtitle text";
+}
+```
+
+## Layout Helpers
+
+### @ContentSeparator
+Horizontal divider line.
+
+```ui
+$C.@ContentSeparator {
+  @Anchor = (Vertical: 10);
+}
+```
+
+### @VerticalSeparator
+Vertical divider for column layouts.
+
+### @PanelSeparatorFancy
+Decorative separator with center ornament.
+
+### @ActionButtonContainer
+Right-aligned button container for footers.
+
+```ui
+$C.@ActionButtonContainer {
+  $C.@TextButton { @Text = "Save"; }
+  $C.@ActionButtonSeparator {}
+  $C.@SecondaryTextButton { @Text = "Cancel"; }
+}
+```
+
+### @BackButton
+Standard back button in bottom-left corner.
+
+```ui
+$C.@BackButton {}
+```
+
+## Scrolling
+
+### @DefaultScrollbarStyle
+Standard scrollbar appearance.
+
+```ui
+Group {
+  LayoutMode: TopScrolling;
+  ScrollbarStyle: $C.@DefaultScrollbarStyle;
+}
+```
+
+### Scrollbar Variants
+
+| Style | Description |
+|-------|-------------|
+| `@DefaultScrollbarStyle` | Standard 6px scrollbar |
+| `@DefaultExtraSpacingScrollbarStyle` | 12px spacing |
+| `@TranslucentScrollbarStyle` | Visible only on hover |
+
+## Visual Elements
+
+### @DefaultSpinner
+Loading spinner animation.
+
+```ui
+$C.@DefaultSpinner {
+  @Anchor = (Width: 32, Height: 32);
+}
+```
+
+### @CloseButton
+X button for closing dialogs.
+
+```ui
+$C.@CloseButton {}  // Top-right positioned
+```
+
+## Color Constants
+
+| Variable | Value | Usage |
+|----------|-------|-------|
+| `@DisabledColor` | #797b7c | Disabled text |
+
+## Padding Constants
+
+| Variable | Value |
+|----------|-------|
+| `@ContentPaddingFull` | 17 |
+| `@InnerPaddingValue` | 8 |
+| `@FullPaddingValue` | 17 |
+| `@TitleHeight` | 38 |
+
+## Header Components
+
+### @HeaderSearch
+Expandable search input for headers.
+
+```ui
+#Title {
+  $C.@Title { @Text = "List"; }
+  $C.@HeaderSearch {}
+}
+```
+
+### @HeaderTextButton
+Text button styled for headers.
+
+### @HeaderSeparator
+Vertical separator for header sections.
+
+## Tab Navigation
+
+### @TopTabsStyle
+Style for top-aligned tab navigation.
+
+### @HeaderTabsStyle
+Style for in-header tabs.
+
+## Tooltips
+
+### @DefaultTextTooltipStyle
+Standard text tooltip styling.
+
+```ui
+TextTooltipStyle(
+  Background: (TexturePath: "Common/TooltipDefaultBackground.png", Border: 24),
+  MaxWidth: 400,
+  LabelStyle: (Wrap: true, FontSize: 16),
+  Padding: 24
+)
+```

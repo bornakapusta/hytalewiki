@@ -1,0 +1,916 @@
+---
+title: "PVP Arena Part 4: Commands & Polish"
+description: Admin tools, player commands, boundaries, and end-game summary
+---
+
+**Goal:** Add commands, arena protections, and a polished end-game experience.
+
+**Prerequisites:** [Part 3: Combat & Scoring](/tutorials/pvp-arena-part3), [Creating Commands](/creating-commands)
+
+**Series:** [Part 1: Arena Core](/tutorials/pvp-arena-part1) | [Part 2: Match Flow](/tutorials/pvp-arena-part2) | [Part 3: Combat](/tutorials/pvp-arena-part3) | Part 4 of 4
+
+---
+
+## What You'll Learn
+
+In this tutorial, you'll learn:
+- **Command creation** - Building admin and player commands
+- **Event cancellation** - Blocking unwanted actions
+- **Permission systems** - Restricting commands to admins
+- **MVP calculation** - Determining the best player
+
+---
+
+## Understanding Commands
+
+Commands are how players interact with your plugin:
+
+```
+/arena join        → Player command (anyone can use)
+/arena start       → Admin command (needs permission)
+/arena stats       → Player command (personal data)
+```
+
+### Command Types in Hytale
+
+```kotlin
+// Simple command (no player context needed)
+class PingCommand : CommandBase("ping", "description") {
+    override fun executeSync(context: CommandContext) {
+        context.sendMessage(Message.raw("Pong!"))
+    }
+}
+
+// Player command (requires being in-game)
+class StatsCommand : AbstractPlayerCommand("stats", "description") {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,  // Guaranteed to be a player
+        world: World
+    ) {
+        // Can use playerRef directly
+    }
+}
+
+// Command collection (subcommands)
+class ArenaCommand : AbstractCommandCollection("arena", "description") {
+    init {
+        addSubCommand(ArenaJoinCommand())
+        addSubCommand(ArenaLeaveCommand())
+    }
+}
+```
+
+---
+
+## Step 1: The Command Collection
+
+Create a parent command with subcommands:
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractCommandCollection
+
+/**
+ * Parent command: /arena
+ *
+ * WHY A COLLECTION?
+ * - Groups related commands: /arena join, /arena leave, etc.
+ * - Cleaner than: /arenajoin, /arenaleave, /arenastart
+ * - Auto-generates help: /arena shows all subcommands
+ *
+ * NAMING CONVENTION:
+ * - Short: /arena (not /pvparena or /battlearena)
+ * - Memorable: players will type this often
+ * - Unique: doesn't conflict with other plugins
+ */
+class ArenaCommand(private val plugin: ArenaPlugin) : AbstractCommandCollection(
+    "arena",
+    "server.commands.arena.description"
+) {
+    init {
+        // Aliases: /a works too
+        addAliases("a")
+
+        // Register all subcommands
+        addSubCommand(ArenaJoinCommand(plugin))
+        addSubCommand(ArenaLeaveCommand(plugin))
+        addSubCommand(ArenaStartCommand(plugin))
+        addSubCommand(ArenaEndCommand(plugin))
+        addSubCommand(ArenaStatsCommand(plugin))
+        addSubCommand(ArenaScoreboardCommand(plugin))
+    }
+}
+```
+
+---
+
+## Step 2: Join Command
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.arguments.types.ArgTypes
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import com.hypixel.hytale.server.core.universe.world.World
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Ref
+import hytale.ecs.Store
+
+/**
+ * /arena join [team]
+ *
+ * Allows players to join the arena with optional team preference.
+ */
+class ArenaJoinCommand(private val plugin: ArenaPlugin) : AbstractPlayerCommand(
+    "join",
+    "Join the arena"
+) {
+    /**
+     * Optional argument: team preference.
+     *
+     * WHY OPTIONAL?
+     * - Most players don't care which team
+     * - Let auto-balance handle it
+     * - But some want to play with friends
+     *
+     * withOptionalArg creates --team=red syntax
+     */
+    private val teamArg = withOptionalArg("team", "preferred team (red/blue)", ArgTypes.STRING)
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val arenaManager = plugin.arenaManager
+
+        // Already in arena?
+        if (arenaManager.getTeam(playerRef.uuid) != null) {
+            context.sendMessage(Message.raw("You're already in the arena!"))
+            return
+        }
+
+        // Parse team preference
+        val teamPref = context.get(teamArg)?.lowercase()
+        val preferredTeam = when (teamPref) {
+            "red" -> Team.RED
+            "blue" -> Team.BLUE
+            else -> null
+        }
+
+        // Try to join
+        val team = if (preferredTeam != null) {
+            arenaManager.addPlayerToTeam(playerRef, preferredTeam)
+        } else {
+            arenaManager.addPlayer(playerRef)
+        }
+
+        if (team != null) {
+            // Success! Initialize combat component
+            plugin.combatManager.onPlayerJoin(playerRef, team)
+            plugin.matchController.onPlayerJoin()
+            context.sendMessage(Message.raw("Joined ${team.displayName}!"))
+        }
+        // Failure messages handled by arenaManager.addPlayer()
+    }
+}
+```
+
+### Add Team Preference to ArenaManager
+
+```kotlin
+class ArenaManager(/* ... */) {
+    /**
+     * Add player with team preference.
+     *
+     * WHY ALLOW PREFERENCE?
+     * - Friends want to play together
+     * - But can't unbalance teams too much
+     *
+     * BALANCE RULE: Only allow if team would be at most 1 ahead.
+     */
+    fun addPlayerToTeam(playerRef: PlayerRef, preferredTeam: Team): Team? {
+        val uuid = playerRef.uuid
+
+        // Standard checks
+        if (playerTeams.containsKey(uuid)) return playerTeams[uuid]
+        if (getPlayerCount() >= config.maxPlayers) {
+            sendMessage(playerRef, "Arena is full!")
+            return null
+        }
+        if (state != ArenaState.WAITING) {
+            sendMessage(playerRef, "Match already in progress!")
+            return null
+        }
+
+        // Check if preferred team is allowed
+        val team = if (canJoinTeam(preferredTeam)) {
+            preferredTeam
+        } else {
+            // Fall back to auto-balance
+            sendMessage(playerRef, "${preferredTeam.displayName} is full, assigning automatically...")
+            getSmallestTeam()
+        }
+
+        playerTeams[uuid] = team
+        alivePlayers[team]?.add(uuid)
+        broadcast("${playerRef.username} joined ${team.displayName}!")
+
+        return team
+    }
+
+    /**
+     * Check if joining a team would unbalance too much.
+     *
+     * RULE: Can join if the team has equal or fewer players.
+     * This means teams can differ by at most 1.
+     */
+    private fun canJoinTeam(team: Team): Boolean {
+        val teamCount = getTeamCount(team)
+        val otherTeam = Team.playingTeams.first { it != team }
+        val otherCount = getTeamCount(otherTeam)
+
+        return teamCount <= otherCount
+    }
+}
+```
+
+---
+
+## Step 3: Leave Command
+
+```kotlin
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent
+
+/**
+ * /arena leave
+ *
+ * Leave the arena and return to lobby.
+ */
+class ArenaLeaveCommand(private val plugin: ArenaPlugin) : AbstractPlayerCommand(
+    "leave",
+    "Leave the arena"
+) {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val arenaManager = plugin.arenaManager
+        val uuid = playerRef.uuid
+
+        // Not in arena?
+        if (arenaManager.getTeam(uuid) == null) {
+            context.sendMessage(Message.raw("You're not in the arena!"))
+            return
+        }
+
+        // Remove from arena
+        arenaManager.removePlayer(uuid)
+        plugin.matchController.onPlayerLeave()
+
+        // Teleport to lobby
+        val transform = store.getComponent(ref, TransformComponent.getComponentType())
+        transform?.teleportPosition(arenaManager.config.lobbySpawn)
+
+        // Clear their inventory
+        val player = playerRef.holder?.getComponent(
+            com.hypixel.hytale.server.core.entity.entities.Player.getComponentType()
+        )
+        player?.inventory?.clear()
+        player?.sendInventory()
+
+        context.sendMessage(Message.raw("You left the arena."))
+    }
+}
+```
+
+---
+
+## Step 4: Admin Commands
+
+### Force Start
+
+```kotlin
+/**
+ * /arena start
+ *
+ * Force start the match (admin only).
+ *
+ * WHY ADMIN ONLY?
+ * - Players could grief by starting with 1 person
+ * - Admins know when the server is ready
+ */
+class ArenaStartCommand(private val plugin: ArenaPlugin) : AbstractPlayerCommand(
+    "start",
+    "Force start the match"
+) {
+    init {
+        /**
+         * Require permission to use this command.
+         *
+         * HOW PERMISSIONS WORK:
+         * - String like "arena.admin.start"
+         * - Checked against player's permission set
+         * - Admins typically have "arena.admin.*" or "*"
+         */
+        requirePermission("arena.admin.start")
+    }
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val arenaManager = plugin.arenaManager
+
+        // Can only start from WAITING
+        if (arenaManager.state != ArenaState.WAITING) {
+            context.sendMessage(Message.raw("Match already in progress or starting!"))
+            return
+        }
+
+        // Need at least 2 players (1v1 minimum)
+        if (arenaManager.getPlayerCount() < 2) {
+            context.sendMessage(Message.raw("Need at least 2 players to start!"))
+            return
+        }
+
+        // Force start
+        plugin.matchController.forceStart()
+        context.sendMessage(Message.raw("Match force-started!"))
+    }
+}
+```
+
+### Force End
+
+```kotlin
+/**
+ * /arena end
+ *
+ * Force end the match (admin only).
+ *
+ * USE CASES:
+ * - Bug during match
+ * - Need to restart server
+ * - Match taking too long
+ */
+class ArenaEndCommand(private val plugin: ArenaPlugin) : AbstractPlayerCommand(
+    "end",
+    "Force end the match"
+) {
+    init {
+        requirePermission("arena.admin.end")
+    }
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val arenaManager = plugin.arenaManager
+
+        // Must be in progress
+        if (arenaManager.state != ArenaState.PLAYING &&
+            arenaManager.state != ArenaState.COUNTDOWN) {
+            context.sendMessage(Message.raw("No active match to end!"))
+            return
+        }
+
+        plugin.matchController.forceEnd()
+        context.sendMessage(Message.raw("Match force-ended!"))
+    }
+}
+```
+
+---
+
+## Step 5: Stats Command
+
+```kotlin
+/**
+ * /arena stats
+ *
+ * Show the player's personal statistics.
+ */
+class ArenaStatsCommand(private val plugin: ArenaPlugin) : AbstractPlayerCommand(
+    "stats",
+    "View your arena stats"
+) {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val stats = plugin.combatManager.getPlayerStats(playerRef)
+
+        if (stats == null) {
+            context.sendMessage(Message.raw("No stats available. Join the arena first!"))
+            return
+        }
+
+        // Format stats nicely
+        context.sendMessage(Message.raw("=== Your Arena Stats ==="))
+        context.sendMessage(Message.raw("Team: ${stats.team.displayName}"))
+        context.sendMessage(Message.raw("Status: ${if (stats.isAlive) "Alive" else "Dead"}"))
+        context.sendMessage(Message.raw("Kills: ${stats.kills}"))
+        context.sendMessage(Message.raw("Deaths: ${stats.deaths}"))
+        context.sendMessage(Message.raw("K/D Ratio: ${"%.2f".format(stats.getKDRatio())}"))
+        context.sendMessage(Message.raw("Damage Dealt: ${"%.1f".format(stats.damageDealt)}"))
+        context.sendMessage(Message.raw("Damage Taken: ${"%.1f".format(stats.damageTaken)}"))
+    }
+}
+```
+
+---
+
+## Step 6: Scoreboard Command
+
+```kotlin
+/**
+ * /arena scoreboard
+ *
+ * Show team scores and player counts.
+ */
+class ArenaScoreboardCommand(private val plugin: ArenaPlugin) : AbstractPlayerCommand(
+    "scoreboard",
+    "View team scores"
+) {
+    init {
+        // Multiple ways to access this command
+        addAliases("score", "scores", "sb")
+    }
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val arenaManager = plugin.arenaManager
+
+        context.sendMessage(Message.raw("=== Arena Scoreboard ==="))
+
+        // Show each team's status
+        Team.playingTeams.forEach { team ->
+            val score = arenaManager.getTeamScore(team)
+            val alive = arenaManager.getAliveCount(team)
+            val total = arenaManager.getTeamCount(team)
+
+            context.sendMessage(Message.raw(
+                "${team.displayName}: $score kills | $alive/$total alive"
+            ))
+        }
+
+        // Show current game state
+        context.sendMessage(Message.raw(""))
+        context.sendMessage(Message.raw("State: ${arenaManager.state}"))
+    }
+}
+```
+
+---
+
+## Step 7: Register Commands
+
+```kotlin
+// In ArenaPlugin.setup():
+
+override fun setup() {
+    // ... existing setup ...
+
+    // Register command collection
+    commandRegistry.registerCommand(ArenaCommand(this))
+}
+```
+
+---
+
+## Step 8: Arena Boundaries
+
+Prevent players from building or breaking outside the arena:
+
+### Add Boundary Config
+
+```kotlin
+data class ArenaConfig(
+    // ... existing fields ...
+
+    /**
+     * Arena boundaries.
+     *
+     * Players can only modify blocks within this radius.
+     * Set to 0 to disable (allow everywhere).
+     */
+    val arenaCenter: Vector3d = Vector3d(0.0, 100.0, 0.0),
+    val arenaRadius: Double = 100.0
+)
+```
+
+### Block Events Outside Arena
+
+```kotlin
+// In ArenaPlugin.registerEvents():
+
+/**
+ * Block placement protection.
+ *
+ * WHY PROTECT?
+ * - Prevent building bridges out of arena
+ * - Keep arena contained
+ * - Prevent griefing outside arena
+ *
+ * HOW event.cancel() WORKS:
+ * - Tells Hytale to NOT process this event
+ * - Block doesn't get placed
+ * - Player sees nothing happen
+ */
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+
+    // Only check arena players
+    if (arenaManager.getTeam(playerRef.uuid) == null) return@register
+
+    // Check if within bounds
+    if (!isWithinArena(event.position)) {
+        event.cancel()
+        arenaManager.sendMessage(playerRef, "You can't build outside the arena!")
+    }
+}
+
+/**
+ * Block breaking protection.
+ */
+eventRegistry.register(BreakBlockEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+
+    if (arenaManager.getTeam(playerRef.uuid) == null) return@register
+
+    if (!isWithinArena(event.position)) {
+        event.cancel()
+        arenaManager.sendMessage(playerRef, "You can't break blocks outside the arena!")
+    }
+}
+
+/**
+ * Check if a position is within the arena bounds.
+ *
+ * Uses 2D distance (ignores Y) for cylinder-shaped arena.
+ * For cube-shaped, check X, Y, Z separately.
+ */
+private fun isWithinArena(pos: Vector3d): Boolean {
+    val center = arenaManager.config.arenaCenter
+    val radius = arenaManager.config.arenaRadius
+
+    // Skip check if radius is 0 (disabled)
+    if (radius <= 0) return true
+
+    // 2D distance (horizontal only)
+    val distance = Math.sqrt(
+        Math.pow(pos.x - center.x, 2.0) +
+        Math.pow(pos.z - center.z, 2.0)
+    )
+
+    return distance <= radius
+}
+```
+
+---
+
+## Step 9: Lobby Damage Prevention
+
+No fighting before the match starts:
+
+```kotlin
+// Add to CombatManager:
+
+/**
+ * Check if damage should be allowed.
+ *
+ * RULES:
+ * 1. Only during PLAYING state
+ * 2. No friendly fire (same team)
+ * 3. No damaging dead players
+ * 4. No damaging spectators
+ */
+fun canTakeDamage(victimRef: PlayerRef, attackerRef: PlayerRef?): Boolean {
+    // Rule 1: Only during match
+    if (arenaManager.state != ArenaState.PLAYING) {
+        return false
+    }
+
+    // Rule 2: No friendly fire
+    if (attackerRef != null) {
+        val attackerTeam = arenaManager.getTeam(attackerRef.uuid)
+        val victimTeam = arenaManager.getTeam(victimRef.uuid)
+
+        if (attackerTeam == victimTeam && attackerTeam != null) {
+            return false
+        }
+    }
+
+    // Rule 3 & 4: No damaging dead/spectators
+    val victimStats = getPlayerStats(victimRef)
+    if (victimStats?.isAlive == false) {
+        return false
+    }
+
+    return true
+}
+
+// Use in damage event handler:
+//
+// eventRegistry.register(EntityDamageEvent::class.java) { event ->
+//     val victim = event.victim
+//     val attacker = event.attacker
+//
+//     if (!combatManager.canTakeDamage(victim, attacker)) {
+//         event.cancel()  // No damage applied
+//         return@register
+//     }
+//
+//     // Process damage normally
+//     combatManager.onPlayerDamage(attacker, victim, event.damage)
+// }
+```
+
+---
+
+## Step 10: End-Game Summary
+
+Show detailed results when the match ends:
+
+```kotlin
+// Add to MatchController:
+
+/**
+ * Show comprehensive end-game summary.
+ *
+ * INCLUDES:
+ * - Winner announcement
+ * - Team scores
+ * - MVP (best player)
+ * - Top 3 players
+ *
+ * WHY DETAILED?
+ * - Rewards good performance
+ * - Gives closure to the match
+ * - Encourages replay (try to be MVP!)
+ */
+private fun showEndGameSummary(winner: Team?) {
+    val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+
+    // Header
+    arenaManager.broadcast("")
+    arenaManager.broadcast("╔══════════════════════════════════╗")
+    arenaManager.broadcast("║         MATCH COMPLETE           ║")
+    arenaManager.broadcast("╠══════════════════════════════════╣")
+
+    // Winner
+    if (winner != null) {
+        arenaManager.broadcast("║  WINNER: ${winner.displayName.padEnd(22)} ║")
+    } else {
+        arenaManager.broadcast("║  RESULT: Draw!                   ║")
+    }
+
+    arenaManager.broadcast("╠══════════════════════════════════╣")
+
+    // Team scores
+    Team.playingTeams.forEach { team ->
+        val score = arenaManager.getTeamScore(team)
+        arenaManager.broadcast("║  ${team.displayName}: $score kills".padEnd(35) + "║")
+    }
+
+    arenaManager.broadcast("╠══════════════════════════════════╣")
+
+    // MVP
+    val mvp = findMVP(world)
+    if (mvp != null) {
+        arenaManager.broadcast("║  MVP: ${mvp.first}".padEnd(35) + "║")
+        arenaManager.broadcast("║    ${mvp.second.kills} kills, ${mvp.second.deaths} deaths".padEnd(33) + "║")
+    }
+
+    arenaManager.broadcast("╠══════════════════════════════════╣")
+
+    // Top players
+    showTopPlayers(world)
+
+    arenaManager.broadcast("╚══════════════════════════════════╝")
+}
+
+/**
+ * Find the MVP (Most Valuable Player).
+ *
+ * SCORING FORMULA:
+ * - Kills worth 2 points
+ * - Damage dealt adds bonus (skill indicator)
+ * - Deaths subtract points
+ *
+ * This rewards aggressive play with high K/D.
+ */
+private fun findMVP(world: World): Pair<String, ArenaPlayerComponent>? {
+    var mvp: Pair<String, ArenaPlayerComponent>? = null
+    var highestScore = Double.MIN_VALUE
+
+    arenaManager.getPlayers().forEach { uuid ->
+        val playerRef = world.players.values.find { it.uuid == uuid } ?: return@forEach
+        val stats = plugin.combatManager.getPlayerStats(playerRef) ?: return@forEach
+
+        // MVP Score = (kills * 2) + (damage / 100) - deaths
+        val score = (stats.kills * 2.0) + (stats.damageDealt / 100.0) - stats.deaths
+
+        if (score > highestScore) {
+            highestScore = score
+            mvp = Pair(playerRef.username, stats)
+        }
+    }
+
+    return mvp
+}
+
+/**
+ * Show top 3 players by kills.
+ */
+private fun showTopPlayers(world: World) {
+    arenaManager.broadcast("║  TOP PLAYERS:                    ║")
+
+    // Collect all players with stats
+    val players = arenaManager.getPlayers().mapNotNull { uuid ->
+        val playerRef = world.players.values.find { it.uuid == uuid }
+        val stats = playerRef?.let { plugin.combatManager.getPlayerStats(it) }
+        if (playerRef != null && stats != null) {
+            Triple(playerRef.username, stats.kills, stats.deaths)
+        } else null
+    }
+
+    // Sort by kills (descending)
+    val sorted = players.sortedByDescending { it.second }
+
+    // Show top 3
+    sorted.take(3).forEachIndexed { index, (name, kills, deaths) ->
+        val line = "║  ${index + 1}. $name: $kills/$deaths".padEnd(35) + "║"
+        arenaManager.broadcast(line)
+    }
+}
+
+// Update endMatch to show summary:
+fun endMatch(reason: EndReason, winningTeam: Team? = null) {
+    if (arenaManager.state != ArenaState.PLAYING) return
+
+    arenaManager.setState(ArenaState.ENDED)
+    gameTickTask?.cancel(false)
+
+    val winner = winningTeam ?: Team.playingTeams.maxByOrNull { arenaManager.getAliveCount(it) }
+
+    // Show detailed summary instead of simple message
+    showEndGameSummary(winner)
+
+    // Schedule reset
+    HytaleServer.SCHEDULED_EXECUTOR.schedule({
+        resetArena()
+    }, 15, TimeUnit.SECONDS)  // Longer delay to read summary
+}
+```
+
+---
+
+## Common Mistakes
+
+### 1. Not Validating Input
+
+```kotlin
+// BAD: Trust user input
+val team = Team.valueOf(teamArg)  // Crashes on invalid input!
+
+// GOOD: Handle errors
+val team = try {
+    Team.valueOf(teamArg.uppercase())
+} catch (e: IllegalArgumentException) {
+    context.sendMessage(Message.raw("Invalid team: $teamArg"))
+    return
+}
+```
+
+### 2. Forgetting Permissions
+
+```kotlin
+// BAD: Anyone can force start
+class StartCommand : AbstractPlayerCommand("start", "...") {
+    override fun execute(...) {
+        plugin.matchController.forceStart()  // Griefable!
+    }
+}
+
+// GOOD: Require permission
+class StartCommand : AbstractPlayerCommand("start", "...") {
+    init {
+        requirePermission("arena.admin.start")
+    }
+    // ...
+}
+```
+
+### 3. Not Canceling Events Properly
+
+```kotlin
+// BAD: Message but allow action
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    if (!isWithinArena(event.position)) {
+        sendMessage("Can't build here!")  // Block still placed!
+    }
+}
+
+// GOOD: Cancel the event
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    if (!isWithinArena(event.position)) {
+        event.cancel()  // Block NOT placed
+        sendMessage("Can't build here!")
+    }
+}
+```
+
+### 4. Blocking in Commands
+
+```kotlin
+// BAD: Long operation in command
+override fun execute(...) {
+    val data = database.queryAllStats()  // Blocks for seconds!
+    // Server frozen during query
+}
+
+// GOOD: Async for long operations
+override fun execute(...) {
+    context.sendMessage(Message.raw("Loading stats..."))
+    CompletableFuture.supplyAsync {
+        database.queryAllStats()
+    }.thenAccept { data ->
+        // Send results when ready
+    }
+}
+```
+
+---
+
+## Complete Command Reference
+
+| Command | Description | Permission |
+|---------|-------------|------------|
+| `/arena join [team]` | Join arena, optional team | - |
+| `/arena leave` | Leave arena | - |
+| `/arena start` | Force start match | `arena.admin.start` |
+| `/arena end` | Force end match | `arena.admin.end` |
+| `/arena stats` | View your stats | - |
+| `/arena scoreboard` | View team scores | - |
+
+---
+
+## Summary
+
+In this part, you learned:
+
+| Concept | Why It Matters |
+|---------|---------------|
+| Command collections | Organize related commands |
+| Permission checks | Prevent abuse of admin commands |
+| Event cancellation | Block unwanted player actions |
+| Input validation | Handle bad user input gracefully |
+| End-game summary | Reward and engage players |
+
+---
+
+## Series Complete!
+
+You've built a complete PVP arena plugin with:
+
+- **Part 1**: State machine, teams, player tracking
+- **Part 2**: Countdown, match timer, game loop
+- **Part 3**: Combat stats, death handling, respawn modes
+- **Part 4**: Commands, boundaries, polish
+
+### What to Build Next
+
+- **Capture the Flag**: Add flag objects and scoring
+- **King of the Hill**: Control point that ticks score
+- **Tournaments**: Bracket system, matchmaking
+- **Persistent Stats**: Database storage for leaderboards
+
+### Related Tutorials
+
+- [RTS Game Tutorial](/tutorials/rts-game-part1) - Resource gathering, buildings, units
+- [Custom Components](/custom-components) - More ECS patterns
+- [Scheduling Tasks](/scheduling-tasks) - Advanced timing

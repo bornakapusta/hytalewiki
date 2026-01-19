@@ -1,0 +1,211 @@
+---
+title: Handling Events
+description: Listen and respond to game events
+---
+
+**Goal:** Build a plugin that tracks player joins, handles chat, and protects spawn.
+
+**Prerequisites:** [Your First Plugin](/your-first-plugin)
+
+## Step 1: Register a Basic Event
+
+In your plugin's `setup()`, register an event listener:
+
+```kotlin
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+
+override fun setup() {
+    eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+        logger.atInfo().log("Player connected: ${event.playerRef}")
+    }
+}
+```
+
+## Step 2: Handle Player Chat
+
+Listen to chat messages and respond:
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.player.PlayerChatEvent
+
+eventRegistry.register(PlayerChatEvent::class.java) { event ->
+    val message = event.message
+
+    // Respond to specific messages
+    if (message.equals("ping", ignoreCase = true)) {
+        val player = event.holder.getComponent(Player.getComponentType())
+        player?.sendMessage(Message.raw("Pong!"))
+    }
+}
+```
+
+## Step 3: Cancel Events
+
+Some events can be cancelled to prevent the default behavior:
+
+```kotlin
+import com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent
+
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    val position = event.position
+
+    // Protect spawn area (within 50 blocks of origin)
+    if (position.x.toInt() in -50..50 &&
+        position.z.toInt() in -50..50) {
+        event.cancel()
+        // Optionally notify player
+    }
+}
+```
+
+## Step 4: Use Event Priority
+
+Control when your listener runs relative to others:
+
+```kotlin
+import com.hypixel.hytale.event.EventPriority
+
+// Run before other listeners
+eventRegistry.register(EventPriority.HIGH, PlayerConnectEvent::class.java) { event ->
+    // Process early
+}
+
+// Run after other listeners (read-only)
+eventRegistry.register(EventPriority.MONITOR, PlayerConnectEvent::class.java) { event ->
+    // Log or monitor, don't modify
+}
+```
+
+**Priority order (first to last):**
+1. `LOWEST` - Runs first
+2. `LOW`
+3. `NORMAL` - Default
+4. `HIGH`
+5. `HIGHEST`
+6. `MONITOR` - Runs last, read-only
+
+## Step 5: Handle Async Events
+
+Some events support async processing:
+
+```kotlin
+eventRegistry.registerAsync(SomeAsyncEvent::class.java) { future ->
+    future.thenApply { event ->
+        // Async processing
+        event
+    }
+}
+```
+
+## Complete Example
+
+Track player statistics:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent
+import com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent
+import com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+class StatsPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    data class PlayerStats(
+        var blocksPlaced: Int = 0,
+        var blocksBroken: Int = 0
+    )
+
+    private val stats = ConcurrentHashMap<UUID, PlayerStats>()
+
+    override fun setup() {
+        // Track player join
+        eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+            val uuid = event.playerRef?.uuid ?: return@register
+            stats.putIfAbsent(uuid, PlayerStats())
+            logger.atInfo().log("Player $uuid joined, tracking stats")
+        }
+
+        // Track player leave
+        eventRegistry.register(PlayerDisconnectEvent::class.java) { event ->
+            val uuid = event.playerRef?.uuid ?: return@register
+            val playerStats = stats[uuid]
+            logger.atInfo().log("Player $uuid left - Placed: ${playerStats?.blocksPlaced}, Broken: ${playerStats?.blocksBroken}")
+        }
+
+        // Track blocks placed
+        eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+            val uuid = event.playerRef?.uuid ?: return@register
+            stats[uuid]?.let { it.blocksPlaced++ }
+        }
+
+        // Track blocks broken
+        eventRegistry.register(BreakBlockEvent::class.java) { event ->
+            val uuid = event.playerRef?.uuid ?: return@register
+            stats[uuid]?.let { it.blocksBroken++ }
+        }
+    }
+
+    override fun start() {
+        logger.atInfo().log("StatsPlugin started")
+    }
+
+    override fun shutdown() {
+        // Save stats to database here
+        logger.atInfo().log("StatsPlugin shutdown, saving ${stats.size} player stats")
+    }
+}
+```
+
+## Common Patterns
+
+### Safe Player Access
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    val holder = event.holder
+
+    val player = holder.getComponent(Player.getComponentType())
+    if (player == null) {
+        logger.atWarning().log("Player component not found")
+        return@register
+    }
+
+    // Now safe to use player
+}
+```
+
+### Global Listeners
+
+Listen regardless of event key:
+
+```kotlin
+eventRegistry.registerGlobal(SomeKeyedEvent::class.java) { event ->
+    // Called for all keys
+}
+```
+
+### Unhandled Events
+
+Handle events no other listener processed:
+
+```kotlin
+eventRegistry.registerUnhandled(SomeEvent::class.java) { event ->
+    // Fallback handler
+}
+```
+
+## Next Steps
+
+- [Event List](/event-list) - All available events
+- [Creating Commands](/creating-commands) - Add commands
+- [Working with Players](/working-with-players) - Player manipulation

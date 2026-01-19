@@ -1,0 +1,197 @@
+---
+title: Portal & Teleportation UI
+description: UI components for portals, teleporters, and transportation systems
+---
+
+Components for portal interactions, teleportation devices, and player transportation.
+
+## Portals.ui
+
+**Purpose**: Main portal interface with artwork, objectives, and summon button
+**Location**: `Pages/Portals/Portals.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#LeftPane` | Group | Portal artwork display with runic border |
+| `#RightPane` | Group | Info panel with objectives and tips |
+| `#Title0` | Label | Portal name display |
+| `#ExplorationTimeText` | Label | Time limit display |
+| `#ObjectivesList` | Group | Dynamic objective list |
+| `#TipsList` | Group | Dynamic tips list |
+| `#Pills` | Group | Tag pills container |
+| `#SummonButton` | TextButton | Portal activation button |
+
+```ui
+Group #LeftPane {
+  Anchor: (Width: 431, Height: 716 + 30, Left: 15, Right: 15);
+
+  Group #Artwork {
+    Background: (TexturePath: "Portals/DefaultArtwork.png");
+    Anchor: (Width: 345, Height: 629);
+  }
+}
+```
+
+## BulletPoint.ui
+
+**Purpose**: Bullet point item for lists
+**Location**: `Pages/Portals/BulletPoint.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Label` | Label | Bullet point text |
+
+```ui
+Group {
+  LayoutMode: Left;
+
+  Group {
+    Background: (TexturePath: "IconBullet.png");
+    Anchor: (Width: 8, Height: 8, Top: 6, Right: 6);
+  }
+
+  Label #Label {
+    Text: "Bullet Point";
+    Style: LabelStyle(FontSize: 15, TextColor: #dee2ef);
+  }
+}
+```
+
+## Pill.ui
+
+**Purpose**: Small tag/badge component
+**Location**: `Pages/Portals/Pill.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Label` | Label | Pill text content |
+
+```ui
+Group {
+  Anchor: (Left: 6, Height: 12);
+  Background: (TexturePath: "PillBg.png");
+
+  Label #Label {
+    Padding: (Left: 2, Right: 2);
+    Text: "Pill";
+    Style: @PillStyle;
+  }
+}
+```
+
+## PortalDeviceActive.ui
+
+**Purpose**: Active portal status display with remaining duration
+**Location**: `Pages/PortalDeviceActive.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#PortalTitle` | Label | Portal name |
+| `#PortalDescription` | Label | Portal description |
+| `#PlayersInside` | Label | Player count display |
+| `#PortalIsOpen` | Label | Open status indicator |
+| `#RemainingDuration` | Label | Time remaining |
+| `#Error` | Group | Error message container |
+| `#Died` | Group | Death/forsaken state display |
+
+```ui
+Group #AlreadyOpen {
+  LayoutMode: Top;
+  Padding: (Top: 60, Bottom: 30);
+
+  Label #PortalIsOpen {
+    Visible: false;
+    Text: %server.customUI.portalDevice.portalIsOpen;
+    Style: (FontSize: 16, RenderBold: true, HorizontalAlignment: Center);
+  }
+
+  Label #RemainingDuration {
+    Style: (FontSize: 18, RenderBold: true, HorizontalAlignment: Center);
+  }
+}
+```
+
+## PortalDeviceError.ui
+
+**Purpose**: Portal error message display
+**Location**: `Pages/PortalDeviceError.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#UsageErrorTitle` | Label | Error title (red) |
+| `#UsageErrorLabel` | Label | Error description |
+
+```ui
+Label #UsageErrorTitle {
+  Style: (FontSize: 18, RenderBold: true, RenderUppercase: true, TextColor: #d13b57, HorizontalAlignment: Center);
+  Text: %server.customUI.portalDevice.error;
+}
+```
+
+## PortalDeviceSummon.ui
+
+**Purpose**: Portal summon interface with time limits and objectives
+**Location**: `Pages/PortalDeviceSummon.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#Artwork` | Group | Portal artwork |
+| `#Vignette` | Group | Highlight effect overlay |
+| `#ExploTimeBullet` | Group | Exploration time display |
+| `#BreachTimeBullet` | Group | Breach time display |
+| `#Objectives` | Group | Objectives section |
+| `#Tips` | Group | Tips section |
+| `#Pills` | Group | Category pills |
+| `#FlavorLabel` | Label | Flavor text |
+| `#SummonButton` | TextButton | Summon action button |
+
+```ui
+Group #BottomStuff {
+  LayoutMode: Bottom;
+
+  Group #Summon {
+    LayoutMode: MiddleCenter;
+    Anchor: (Height: 126);
+    Background: (TexturePath: "Portals/OpenButtonBackground.png");
+
+    $C.@TextButton #SummonButton {
+      @Anchor = (Top: 8, MinWidth: 250, Bottom: 0);
+      Text: %server.customUI.portalDevice.summonPortal;
+    }
+  }
+}
+```
+
+## Teleporter.ui
+
+**Purpose**: Teleporter configuration with coordinates and warp management
+**Location**: `Pages/Teleporter.ui`
+
+| Element ID | Type | Description |
+|------------|------|-------------|
+| `#ErrorScreen` | Group | Error display section |
+| `#FullSettings` | Group | Main settings container |
+| `#BlockRelative` | CheckBoxWithLabel | Block-relative toggle |
+| `#X`, `#Y`, `#Z` | Group | Coordinate inputs |
+| `#Yaw`, `#Pitch`, `#Roll` | Group | Rotation inputs |
+| `#WorldDropdown` | DropdownBox | World selector |
+| `#WarpDropdown` | DropdownBox | Warp point selector |
+| `#NewWarp` | TextField | New warp name input |
+| `#SaveButton` | TextButton | Save action |
+
+```ui
+Group #X {
+  LayoutMode: Top;
+
+  Label { Text: "X"; }
+
+  $C.@NumberField #Input {
+    @Anchor = (Width: 60);
+    Format: (MaxDecimalPlaces: 2, Step: 0.5);
+  }
+
+  $C.@CheckBoxWithLabel {
+    @Text = %server.customUI.teleporter.relative;
+  }
+}
+```

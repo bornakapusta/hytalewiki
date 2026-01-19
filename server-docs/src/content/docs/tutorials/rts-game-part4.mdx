@@ -1,0 +1,790 @@
+---
+title: "RTS Game Part 4: Combat & Win Conditions"
+description: Unit combat, building destruction, and victory
+---
+
+**Goal:** Implement combat between units, building attacks, and game-ending victory conditions.
+
+**Prerequisites:** [Part 3: Unit System](/tutorials/rts-game-part3)
+
+**Series:** [Part 1: Resources](/tutorials/rts-game-part1) | [Part 2: Buildings](/tutorials/rts-game-part2) | [Part 3: Units](/tutorials/rts-game-part3) | Part 4 of 4
+
+---
+
+## What We're Building
+
+A complete combat system:
+- Units attack enemy units and buildings
+- Damage calculation with range and cooldowns
+- Building destruction
+- Victory conditions (eliminate enemy base or all units)
+- End-game summary
+
+---
+
+## Step 1: Combat Configuration
+
+Define combat constants:
+
+```kotlin
+/**
+ * Combat system configuration.
+ *
+ * Centralizing these values makes balancing easier.
+ * Change one number here instead of hunting through code.
+ */
+object CombatConfig {
+    // How often units can attack (seconds)
+    const val ATTACK_COOLDOWN = 1.0
+
+    // Damage multipliers for unit matchups
+    val damageMultipliers = mapOf(
+        // Warriors are strong against archers
+        Pair(UnitType.WARRIOR, UnitType.ARCHER) to 1.5,
+        Pair(UnitType.WARRIOR, UnitType.CROSSBOWMAN) to 1.3,
+
+        // Archers are strong against knights (kiting)
+        Pair(UnitType.ARCHER, UnitType.KNIGHT) to 1.4,
+        Pair(UnitType.CROSSBOWMAN, UnitType.KNIGHT) to 1.5,
+
+        // Knights are strong against infantry
+        Pair(UnitType.KNIGHT, UnitType.WARRIOR) to 1.5,
+        Pair(UnitType.KNIGHT, UnitType.PEASANT) to 2.0
+    )
+
+    // Bonus damage to buildings
+    const val BUILDING_DAMAGE_MULTIPLIER = 0.5  // Units do half damage to buildings
+
+    // Watchtower attack stats
+    const val TOWER_DAMAGE = 20
+    const val TOWER_RANGE = 20.0
+    const val TOWER_ATTACK_COOLDOWN = 2.0
+
+    fun getDamageMultiplier(attacker: UnitType, defender: UnitType): Double {
+        return damageMultipliers[Pair(attacker, defender)] ?: 1.0
+    }
+}
+```
+
+---
+
+## Step 2: Combat Manager
+
+Handles all combat calculations:
+
+```kotlin
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import org.joml.Vector3d
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Manages combat between units and buildings.
+ */
+class CombatManager(
+    private val plugin: JavaPlugin,
+    private val unitManager: UnitManager,
+    private val buildingManager: BuildingManager,
+    private val teamManager: TeamManager
+) {
+    // Track attack cooldowns: entityId → last attack time (ms)
+    private val attackCooldowns = ConcurrentHashMap<UUID, Long>()
+
+    /**
+     * Check if a unit can attack right now.
+     */
+    fun canAttack(unitId: UUID): Boolean {
+        val lastAttack = attackCooldowns[unitId] ?: 0L
+        val cooldownMs = (CombatConfig.ATTACK_COOLDOWN * 1000).toLong()
+        return System.currentTimeMillis() - lastAttack >= cooldownMs
+    }
+
+    /**
+     * Unit attacks another unit.
+     *
+     * Returns damage dealt (0 if attack failed).
+     */
+    fun attackUnit(attackerId: UUID, targetId: UUID): Int {
+        val attacker = unitManager.getUnit(attackerId) ?: return 0
+        val target = unitManager.getUnit(targetId) ?: return 0
+
+        // Can't attack your own team
+        if (attacker.team == target.team) return 0
+
+        // Check cooldown
+        if (!canAttack(attackerId)) return 0
+
+        // Check range
+        val attackerPos = getUnitPosition(attacker) ?: return 0
+        val targetPos = getUnitPosition(target) ?: return 0
+        val distance = attackerPos.distance(targetPos)
+
+        if (distance > attacker.type.attackRange) {
+            return 0  // Out of range
+        }
+
+        // Calculate damage
+        var damage = attacker.type.damage
+        val multiplier = CombatConfig.getDamageMultiplier(attacker.type, target.type)
+        damage = (damage * multiplier).toInt()
+
+        // Apply damage
+        val killed = target.takeDamage(damage)
+        recordAttack(attackerId)
+
+        // Handle death
+        if (killed) {
+            onUnitKilled(target, attacker)
+        }
+
+        plugin.logger.atFine().log(
+            "${attacker.type.displayName} hit ${target.type.displayName} for $damage damage"
+        )
+
+        return damage
+    }
+
+    /**
+     * Unit attacks a building.
+     */
+    fun attackBuilding(attackerId: UUID, buildingId: UUID): Int {
+        val attacker = unitManager.getUnit(attackerId) ?: return 0
+        val building = buildingManager.getBuilding(buildingId) ?: return 0
+
+        // Can't attack your own buildings
+        if (attacker.team == building.team) return 0
+
+        // Check cooldown
+        if (!canAttack(attackerId)) return 0
+
+        // Check range
+        val attackerPos = getUnitPosition(attacker) ?: return 0
+        val distance = attackerPos.distance(building.position)
+
+        if (distance > attacker.type.attackRange) {
+            return 0
+        }
+
+        // Calculate damage (reduced vs buildings)
+        var damage = attacker.type.damage
+        damage = (damage * CombatConfig.BUILDING_DAMAGE_MULTIPLIER).toInt()
+
+        // Apply damage
+        val destroyed = building.takeDamage(damage)
+        recordAttack(attackerId)
+
+        if (destroyed) {
+            onBuildingDestroyed(building, attacker)
+        }
+
+        return damage
+    }
+
+    /**
+     * Building (watchtower) attacks a unit.
+     */
+    fun towerAttack(buildingId: UUID, targetId: UUID): Int {
+        val building = buildingManager.getBuilding(buildingId) ?: return 0
+        val target = unitManager.getUnit(targetId) ?: return 0
+
+        // Only watchtowers attack
+        if (building.type != BuildingType.WATCHTOWER) return 0
+        if (!building.isComplete) return 0
+
+        // Can't attack your own units
+        if (building.team == target.team) return 0
+
+        // Check cooldown
+        if (!canAttack(buildingId)) return 0
+
+        // Check range
+        val targetPos = getUnitPosition(target) ?: return 0
+        val distance = building.position.distance(targetPos)
+
+        if (distance > CombatConfig.TOWER_RANGE) {
+            return 0
+        }
+
+        // Apply damage
+        val damage = CombatConfig.TOWER_DAMAGE
+        val killed = target.takeDamage(damage)
+        recordAttack(buildingId)
+
+        if (killed) {
+            onUnitKilled(target, null)  // Killed by building
+        }
+
+        return damage
+    }
+
+    private fun recordAttack(entityId: UUID) {
+        attackCooldowns[entityId] = System.currentTimeMillis()
+    }
+
+    private fun getUnitPosition(unit: Unit): Vector3d? {
+        // Get position from entity transform
+        // In real implementation, query the ECS
+        return null  // Placeholder
+    }
+
+    private fun onUnitKilled(victim: Unit, killer: Unit?) {
+        unitManager.removeUnit(victim.id)
+
+        val killerName = killer?.type?.displayName ?: "Watchtower"
+        plugin.logger.atInfo().log(
+            "${victim.type.displayName} (${victim.team}) killed by $killerName"
+        )
+
+        // Could broadcast to teams, award points, etc.
+    }
+
+    private fun onBuildingDestroyed(building: Building, attacker: Unit) {
+        plugin.logger.atInfo().log(
+            "${building.type.displayName} (${building.team}) destroyed by ${attacker.team}"
+        )
+
+        // Could refund partial resources, spawn rubble, etc.
+    }
+
+    /**
+     * Called every game tick.
+     * Processes automatic combat (towers, auto-attack).
+     */
+    fun tick() {
+        tickTowerAttacks()
+        tickAutoAttack()
+    }
+
+    /**
+     * Watchtowers automatically attack nearby enemies.
+     */
+    private fun tickTowerAttacks() {
+        for (building in buildingManager.getAllBuildings()) {
+            if (building.type != BuildingType.WATCHTOWER) continue
+            if (!building.isComplete) continue
+
+            // Find nearest enemy unit in range
+            val enemyTeams = Team.playableTeams.filter { it != building.team }
+            for (team in enemyTeams) {
+                val units = unitManager.getTeamUnits(team)
+                for (unit in units) {
+                    val pos = getUnitPosition(unit) ?: continue
+                    if (building.position.distance(pos) <= CombatConfig.TOWER_RANGE) {
+                        towerAttack(building.id, unit.id)
+                        break  // One attack per tick
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Units in ATTACKING state auto-attack their target.
+     */
+    private fun tickAutoAttack() {
+        for (unit in unitManager.getAllUnits()) {
+            if (unit.state != UnitState.ATTACKING) continue
+
+            // Attack target unit
+            unit.targetUnit?.let { targetId ->
+                val damage = attackUnit(unit.id, targetId)
+                if (damage == 0) {
+                    // Target dead or out of range, stop attacking
+                    unit.state = UnitState.IDLE
+                    unit.targetUnit = null
+                }
+            }
+
+            // Attack target building
+            unit.targetBuilding?.let { targetId ->
+                val damage = attackBuilding(unit.id, targetId)
+                if (damage == 0) {
+                    unit.state = UnitState.IDLE
+                    unit.targetBuilding = null
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## Step 3: Victory Conditions
+
+```kotlin
+/**
+ * How a game can end.
+ */
+enum class VictoryCondition {
+    ELIMINATION,    // All enemy units and buildings destroyed
+    HEADQUARTERS,   // Enemy HQ destroyed (if we add HQ building)
+    SURRENDER,      // Team surrendered
+    TIMEOUT         // Time limit reached, most points wins
+}
+
+/**
+ * Tracks game progress and victory conditions.
+ */
+class VictoryManager(
+    private val plugin: JavaPlugin,
+    private val unitManager: UnitManager,
+    private val buildingManager: BuildingManager,
+    private val teamManager: TeamManager
+) {
+    // Game state
+    var gameOver: Boolean = false
+        private set
+    var winner: Team? = null
+        private set
+    var victoryCondition: VictoryCondition? = null
+        private set
+
+    // Optional: time limit (0 = no limit)
+    var timeLimitSeconds: Int = 0
+    var elapsedSeconds: Int = 0
+
+    /**
+     * Check all victory conditions.
+     * Called every game tick.
+     */
+    fun tick(): Team? {
+        if (gameOver) return winner
+
+        elapsedSeconds++
+
+        // Check elimination
+        val eliminated = checkElimination()
+        if (eliminated != null) {
+            return declareWinner(eliminated, VictoryCondition.ELIMINATION)
+        }
+
+        // Check timeout
+        if (timeLimitSeconds > 0 && elapsedSeconds >= timeLimitSeconds) {
+            val winner = determineTimeoutWinner()
+            return declareWinner(winner, VictoryCondition.TIMEOUT)
+        }
+
+        return null
+    }
+
+    /**
+     * Check if any team has been eliminated.
+     *
+     * Elimination = no units AND no production buildings
+     */
+    private fun checkElimination(): Team? {
+        for (team in Team.playableTeams) {
+            val units = unitManager.getTeamUnitCount(team)
+            val productionBuildings = buildingManager.getTeamBuildings(team)
+                .count { it.canTrain }
+
+            if (units == 0 && productionBuildings == 0) {
+                // This team is eliminated - other team wins
+                val winner = Team.playableTeams.first { it != team }
+                return winner
+            }
+        }
+        return null
+    }
+
+    /**
+     * Determine winner by points if time runs out.
+     */
+    private fun determineTimeoutWinner(): Team {
+        val scores = Team.playableTeams.associateWith { team ->
+            calculateScore(team)
+        }
+
+        return scores.maxByOrNull { it.value }?.key ?: Team.RED
+    }
+
+    /**
+     * Calculate a team's score.
+     *
+     * Score = (units * 10) + (buildings * 50) + (total resources / 10)
+     */
+    fun calculateScore(team: Team): Int {
+        val unitScore = unitManager.getTeamUnitCount(team) * 10
+        val buildingScore = buildingManager.getTeamBuildings(team).size * 50
+
+        // Resource score (simplified)
+        // In real impl, sum all resources
+        val resourceScore = 0  // Placeholder
+
+        return unitScore + buildingScore + resourceScore
+    }
+
+    /**
+     * Declare a winner and end the game.
+     */
+    private fun declareWinner(team: Team, condition: VictoryCondition): Team {
+        gameOver = true
+        winner = team
+        victoryCondition = condition
+
+        plugin.logger.atInfo().log("Game over! $team wins by $condition")
+        return team
+    }
+
+    /**
+     * Allow a team to surrender.
+     */
+    fun surrender(team: Team) {
+        val winner = Team.playableTeams.first { it != team }
+        declareWinner(winner, VictoryCondition.SURRENDER)
+    }
+}
+```
+
+---
+
+## Step 4: Attack Command
+
+Let players command units to attack:
+
+```kotlin
+class AttackCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "attack",
+    "Command your units to attack a target"
+) {
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+
+        // Get player's look target (raycast)
+        val transform = store.getComponent(ref, TransformComponent.getComponentType())
+        val position = transform?.position ?: return
+        val rotation = transform.rotation
+
+        // Find target at look position (simplified)
+        // In real impl, do a raycast to find entity/building
+
+        context.sendMessage(Message.raw("Attack command: Look at a target and use /attack"))
+        context.sendMessage(Message.raw("Your units will attack the nearest enemy."))
+
+        // For now, have all units attack nearest enemy
+        val units = plugin.gameManager.unitManager.getTeamUnits(team)
+        val enemies = Team.playableTeams
+            .filter { it != team }
+            .flatMap { plugin.gameManager.unitManager.getTeamUnits(it) }
+
+        if (enemies.isEmpty()) {
+            context.sendMessage(Message.raw("No enemies found!"))
+            return
+        }
+
+        var attackCount = 0
+        for (unit in units) {
+            // Find nearest enemy
+            // val nearest = findNearestEnemy(unit, enemies)
+            // unit.targetUnit = nearest.id
+            // unit.state = UnitState.ATTACKING
+            attackCount++
+        }
+
+        context.sendMessage(Message.raw("$attackCount units attacking!"))
+    }
+}
+```
+
+---
+
+## Step 5: End Game Sequence
+
+```kotlin
+class GameManager(private val plugin: JavaPlugin) {
+
+    // ... existing managers ...
+    val combatManager: CombatManager
+    val victoryManager: VictoryManager
+
+    private var gameActive = false
+
+    init {
+        // ... existing init ...
+        combatManager = CombatManager(plugin, unitManager, buildingManager, teamManager)
+        victoryManager = VictoryManager(plugin, unitManager, buildingManager, teamManager)
+    }
+
+    override fun tick() {
+        if (!gameActive) return
+
+        tickCount++
+
+        // ... existing tick logic ...
+
+        combatManager.tick()
+
+        // Check victory
+        val winner = victoryManager.tick()
+        if (winner != null) {
+            endGame(winner)
+        }
+    }
+
+    fun startGame() {
+        gameActive = true
+
+        // Initialize teams
+        Team.playableTeams.forEach { team ->
+            resourceManager.initializeTeam(team)
+        }
+
+        startGameLoop()
+        broadcastAll("=== GAME STARTED ===")
+    }
+
+    private fun endGame(winner: Team) {
+        gameActive = false
+        gameLoopTask?.cancel(false)
+
+        showEndGameSummary(winner)
+
+        // Reset after delay
+        HytaleServer.SCHEDULED_EXECUTOR.schedule({
+            resetGame()
+        }, 30, TimeUnit.SECONDS)
+    }
+
+    private fun showEndGameSummary(winner: Team) {
+        broadcastAll("")
+        broadcastAll("╔══════════════════════════════════╗")
+        broadcastAll("║         GAME OVER                ║")
+        broadcastAll("╠══════════════════════════════════╣")
+        broadcastAll("║  Winner: ${winner.displayName.padEnd(22)} ║")
+        broadcastAll("║  Condition: ${victoryManager.victoryCondition.toString().padEnd(19)} ║")
+        broadcastAll("╠══════════════════════════════════╣")
+
+        // Team scores
+        Team.playableTeams.forEach { team ->
+            val score = victoryManager.calculateScore(team)
+            val units = unitManager.getTeamUnitCount(team)
+            val buildings = buildingManager.getTeamBuildings(team).size
+            broadcastAll("║  ${team.displayName}:")
+            broadcastAll("║    Score: $score")
+            broadcastAll("║    Units: $units | Buildings: $buildings")
+        }
+
+        broadcastAll("╠══════════════════════════════════╣")
+
+        // MVP (player with most resources gathered)
+        val mvp = teamManager.getAllPlayers()
+            .maxByOrNull { it.getTotalGathered() }
+        if (mvp != null) {
+            broadcastAll("║  MVP: ${mvp.username}")
+            broadcastAll("║  Gathered: ${mvp.getTotalGathered()} resources")
+        }
+
+        broadcastAll("╚══════════════════════════════════╝")
+    }
+
+    private fun resetGame() {
+        // Clear all state
+        unitManager.clear()
+        buildingManager.clear()
+        resourceManager.reset()
+        victoryManager.reset()
+
+        broadcastAll("Game reset. Ready for new match!")
+    }
+
+    private fun broadcastAll(message: String) {
+        // Send to all players
+        val world = plugin.universeService.universe?.worlds?.get("default") ?: return
+        world.players.values.forEach { playerRef ->
+            val player = playerRef.holder?.getComponent(Player.getComponentType())
+            player?.sendMessage(Message.raw(message))
+        }
+    }
+}
+```
+
+---
+
+## Step 6: Surrender Command
+
+```kotlin
+class SurrenderCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "surrender",
+    "Surrender the match"
+) {
+    private val confirmFlag = withFlagArg("confirm", "Confirm surrender")
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+
+        if (!context.get(confirmFlag)) {
+            context.sendMessage(Message.raw("Are you sure you want to surrender?"))
+            context.sendMessage(Message.raw("This will end the game for your entire team!"))
+            context.sendMessage(Message.raw("Use /surrender --confirm to confirm."))
+            return
+        }
+
+        // Require majority vote? For now, any player can surrender
+        plugin.gameManager.victoryManager.surrender(team)
+        context.sendMessage(Message.raw("${team.displayName} has surrendered!"))
+    }
+}
+```
+
+---
+
+## Complete Project Structure
+
+```
+com/example/rts/
+├── RTSPlugin.kt              # Entry point
+├── GameManager.kt            # Central coordinator
+│
+├── managers/
+│   ├── TeamManager.kt        # Player/team tracking
+│   ├── ResourceManager.kt    # Resource pools
+│   ├── BuildingManager.kt    # Building placement/construction
+│   ├── UnitManager.kt        # Unit spawning/management
+│   ├── CombatManager.kt      # Combat calculations
+│   └── VictoryManager.kt     # Win conditions
+│
+├── models/
+│   ├── Resource.kt           # Resource enum
+│   ├── Team.kt               # Team enum
+│   ├── PlayerData.kt         # Per-player state
+│   ├── BuildingType.kt       # Building definitions
+│   ├── Building.kt           # Building instance
+│   ├── UnitType.kt           # Unit definitions
+│   └── Unit.kt               # Unit instance
+│
+├── effects/
+│   └── BuildingEffects.kt    # Building bonus calculations
+│
+├── config/
+│   └── CombatConfig.kt       # Combat balance numbers
+│
+└── commands/
+    ├── ResourcesCommand.kt
+    ├── BuildCommand.kt
+    ├── BuildingsCommand.kt
+    ├── TrainCommand.kt
+    ├── UnitsCommand.kt
+    ├── AttackCommand.kt
+    └── SurrenderCommand.kt
+```
+
+---
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `/resources` | View team's resources |
+| `/build <type>` | Place a building |
+| `/buildings` | View team's buildings |
+| `/buildings --list` | List all building types |
+| `/train <type>` | Train a unit |
+| `/units` | View team's army |
+| `/units --list` | List all unit types |
+| `/attack` | Command units to attack |
+| `/surrender --confirm` | Surrender the match |
+
+---
+
+## Key Concepts Explained
+
+### Combat Resolution
+
+```kotlin
+// Simple damage formula
+damage = baseDamage * typeMultiplier * randomVariance
+
+// More complex (not implemented)
+damage = (attack - defense) * weaponType * armor * critChance
+```
+
+We kept it simple: base damage * type counter multiplier. This is enough for strategic depth without overwhelming complexity.
+
+### Victory Conditions
+
+```kotlin
+// Elimination: Classic RTS win condition
+if (enemyUnits == 0 && enemyBuildings == 0) win()
+
+// Headquarters: Destroy specific building
+if (enemyHQ.destroyed) win()
+
+// Timeout: Points-based
+if (timeUp) highestScore.wins()
+```
+
+Different modes for different play styles:
+- **Elimination**: Long, total war games
+- **Headquarters**: Shorter, objective-focused
+- **Timeout**: Fixed-length matches for tournaments
+
+### Rock-Paper-Scissors Balance
+
+```kotlin
+// Warriors beat Archers (close range advantage)
+// Archers beat Knights (can kite, stay at range)
+// Knights beat Warriors (armor and damage)
+
+// This creates strategic diversity:
+// - Pure warrior rush? Countered by archers
+// - All archers? Knights dive in
+// - Mixed army? More flexible but expensive
+```
+
+---
+
+## Testing Checklist
+
+1. **Resources**
+   - [ ] Block breaking yields resources
+   - [ ] Building bonuses apply
+   - [ ] Passive income works
+
+2. **Buildings**
+   - [ ] Placement costs resources
+   - [ ] Construction takes time
+   - [ ] Buildings can be destroyed
+
+3. **Units**
+   - [ ] Training from buildings works
+   - [ ] Food upkeep consumed
+   - [ ] Starvation damages units
+
+4. **Combat**
+   - [ ] Units attack enemies
+   - [ ] Damage multipliers apply
+   - [ ] Watchtowers auto-attack
+
+5. **Victory**
+   - [ ] Elimination detected
+   - [ ] Surrender works
+   - [ ] End-game summary shows
+
+---
+
+## Series Complete
+
+You've built a complete RTS game with:
+- **Resource System**: Gathering, pools, passive income
+- **Building System**: Placement, construction, effects
+- **Unit System**: Training, upkeep, commands
+- **Combat System**: Damage, towers, death
+- **Victory System**: Conditions, scoring, summary
+
+**Next steps to explore:**
+- [Custom Components](/custom-components) - Add unit AI behaviors
+- [Manipulating Blocks](/manipulating-blocks) - Visual building construction
+- [UI System](/ui) - Resource bars, minimap, selection

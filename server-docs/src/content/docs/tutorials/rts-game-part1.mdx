@@ -1,0 +1,740 @@
+---
+title: "RTS Game Part 1: Resource System"
+description: Build a team-based resource gathering and management system
+---
+
+**Goal:** Create the foundation for an RTS game with team-based resource pools.
+
+**Prerequisites:** [Your First Plugin](/your-first-plugin), [Handling Events](/handling-events)
+
+**Series:** Part 1 of 4 | [Part 2: Buildings](/tutorials/rts-game-part2) | [Part 3: Units](/tutorials/rts-game-part3) | [Part 4: Combat](/tutorials/rts-game-part4)
+
+---
+
+## What We're Building
+
+An RTS (Real-Time Strategy) game where:
+- Players join teams (Red vs Blue)
+- Teams gather resources (Wood, Stone, Iron, Food, Gold)
+- Resources are shared across the team
+- Players harvest blocks to gain resources
+- Passive income rewards teams over time
+
+## Understanding the Architecture
+
+RTS games have complex state. We'll use this structure:
+
+```
+RTSPlugin (entry point)
+├── GameManager (orchestrates everything)
+│   ├── TeamManager (player ↔ team mapping)
+│   ├── ResourceManager (team resource pools)
+│   ├── BuildingManager (Part 2)
+│   └── UnitManager (Part 3)
+└── Models (Team, Resource, PlayerData)
+```
+
+**Why this structure?**
+- **Single Responsibility**: Each manager handles one concern
+- **Testability**: Managers can be tested independently
+- **Flexibility**: Easy to swap implementations or add features
+
+---
+
+## Step 1: Define Resource Types
+
+First, we need to know what resources exist. Enums are perfect for fixed sets:
+
+```kotlin
+/**
+ * Resources in our RTS game.
+ *
+ * Why an enum?
+ * - Type safety: Can't accidentally use "Wod" instead of "WOOD"
+ * - Exhaustive checks: Compiler warns if we miss a case in `when`
+ * - Metadata: Each resource carries its display name
+ */
+enum class Resource(val displayName: String) {
+    WOOD("Wood"),
+    STONE("Stone"),
+    IRON("Iron"),
+    FOOD("Food"),
+    GOLD("Gold");
+
+    companion object {
+        /**
+         * Map block types to resources.
+         * Returns null if the block doesn't yield resources.
+         */
+        fun fromBlockType(blockType: String): Resource? {
+            return when {
+                blockType.contains("Wood") || blockType.contains("Log") -> WOOD
+                blockType.contains("Stone") || blockType.contains("Rock") -> STONE
+                blockType.contains("Iron") || blockType.contains("Ore") -> IRON
+                blockType.contains("Wheat") || blockType.contains("Crop") -> FOOD
+                else -> null
+            }
+        }
+    }
+}
+```
+
+**Key insight:** The `fromBlockType` function centralizes the block→resource mapping. When you add new block types, you only change this one place.
+
+---
+
+## Step 2: Define Teams
+
+```kotlin
+/**
+ * Teams in the game.
+ *
+ * NONE exists for players not yet assigned - this avoids null checks.
+ * Using a "null object" pattern: NONE is a valid team that means "no team".
+ */
+enum class Team(val displayName: String, val colorCode: String) {
+    RED("Red Team", "§c"),
+    BLUE("Blue Team", "§9"),
+    NONE("Unassigned", "§7");
+
+    companion object {
+        // Only these teams actually play
+        val playableTeams = listOf(RED, BLUE)
+    }
+}
+```
+
+---
+
+## Step 3: Create Player Data
+
+Track per-player state:
+
+```kotlin
+import java.util.UUID
+
+/**
+ * Holds all data for a single player.
+ *
+ * Why a data class?
+ * - Automatic equals/hashCode/toString
+ * - Copy function for immutable updates
+ * - Destructuring support
+ *
+ * Why mutable fields?
+ * - Player state changes frequently during gameplay
+ * - Immutable would require constant object creation
+ */
+data class PlayerData(
+    val uuid: UUID,
+    val username: String,
+    var team: Team = Team.NONE,
+    var resourcesGathered: MutableMap<Resource, Int> = mutableMapOf()
+) {
+    /**
+     * Track resources this player personally gathered.
+     * Useful for end-game stats and leaderboards.
+     */
+    fun addGathered(resource: Resource, amount: Int) {
+        resourcesGathered.merge(resource, amount, Int::plus)
+    }
+
+    fun getTotalGathered(): Int = resourcesGathered.values.sum()
+}
+```
+
+---
+
+## Step 4: Build the Team Manager
+
+The TeamManager handles player↔team relationships:
+
+```kotlin
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Manages team assignments and player data.
+ *
+ * Thread Safety:
+ * - Uses ConcurrentHashMap because events can fire from different threads
+ * - All operations are atomic or use thread-safe patterns
+ */
+class TeamManager(private val plugin: JavaPlugin) {
+
+    // UUID → PlayerData mapping
+    // ConcurrentHashMap for thread-safe access
+    private val players = ConcurrentHashMap<UUID, PlayerData>()
+
+    // Configuration
+    val maxPlayersPerTeam = 5
+
+    /**
+     * Register a new player and auto-assign to a team.
+     *
+     * Returns the assigned team, or NONE if teams are full.
+     */
+    fun addPlayer(playerRef: PlayerRef): Team {
+        val uuid = playerRef.uuid
+        val username = playerRef.username
+
+        // Already registered?
+        players[uuid]?.let { return it.team }
+
+        // Find team with fewest players (load balancing)
+        val team = findSmallestTeam()
+
+        // Create player data
+        val playerData = PlayerData(uuid, username, team)
+        players[uuid] = playerData
+
+        plugin.logger.atInfo().log("$username joined $team")
+        return team
+    }
+
+    /**
+     * Find the team with the fewest players.
+     * If tied, returns the first one (RED).
+     */
+    private fun findSmallestTeam(): Team {
+        val counts = Team.playableTeams.associateWith { team ->
+            players.values.count { it.team == team }
+        }
+
+        // Find minimum, but respect max capacity
+        return counts.entries
+            .filter { it.value < maxPlayersPerTeam }
+            .minByOrNull { it.value }
+            ?.key
+            ?: Team.NONE  // All teams full
+    }
+
+    fun removePlayer(uuid: UUID) {
+        players.remove(uuid)
+    }
+
+    fun getPlayerData(uuid: UUID): PlayerData? = players[uuid]
+
+    fun getTeam(uuid: UUID): Team = players[uuid]?.team ?: Team.NONE
+
+    fun getPlayersOnTeam(team: Team): List<PlayerData> {
+        return players.values.filter { it.team == team }
+    }
+
+    fun getTeamCount(team: Team): Int {
+        return players.values.count { it.team == team }
+    }
+
+    fun getAllPlayers(): Collection<PlayerData> = players.values
+}
+```
+
+**Why `ConcurrentHashMap`?**
+Events in Hytale can fire from multiple threads. Regular `HashMap` isn't thread-safe and can corrupt data or throw `ConcurrentModificationException`. `ConcurrentHashMap` handles this automatically.
+
+---
+
+## Step 5: Build the Resource Manager
+
+Manages team resource pools:
+
+```kotlin
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * Manages shared resource pools for each team.
+ *
+ * Design Decision: Team-based vs Player-based resources
+ * - Team-based: Encourages cooperation, simpler economy
+ * - Player-based: More individual agency, complex trading
+ *
+ * We chose team-based for simplicity and RTS authenticity.
+ */
+class ResourceManager(private val plugin: JavaPlugin) {
+
+    /**
+     * Nested map: Team → Resource → Amount
+     *
+     * AtomicInteger for thread-safe increment/decrement
+     * without explicit locks.
+     */
+    private val teamResources = ConcurrentHashMap<Team, ConcurrentHashMap<Resource, AtomicInteger>>()
+
+    // Starting resources for each team
+    private val startingResources = mapOf(
+        Resource.WOOD to 100,
+        Resource.STONE to 50,
+        Resource.IRON to 0,
+        Resource.FOOD to 50,
+        Resource.GOLD to 0
+    )
+
+    /**
+     * Initialize a team's resource pool.
+     * Called when the game starts.
+     */
+    fun initializeTeam(team: Team) {
+        if (team == Team.NONE) return
+
+        val resources = ConcurrentHashMap<Resource, AtomicInteger>()
+        startingResources.forEach { (resource, amount) ->
+            resources[resource] = AtomicInteger(amount)
+        }
+        teamResources[team] = resources
+
+        plugin.logger.atInfo().log("Initialized resources for $team")
+    }
+
+    /**
+     * Add resources to a team's pool.
+     * Thread-safe via AtomicInteger.
+     */
+    fun addResource(team: Team, resource: Resource, amount: Int) {
+        teamResources[team]?.get(resource)?.addAndGet(amount)
+    }
+
+    /**
+     * Try to spend resources. Returns true if successful.
+     *
+     * Uses compareAndSet for atomic check-and-update.
+     * This prevents race conditions where two players
+     * both "see" enough resources and both spend them.
+     */
+    fun trySpend(team: Team, resource: Resource, amount: Int): Boolean {
+        val current = teamResources[team]?.get(resource) ?: return false
+
+        // Atomic compare-and-set loop
+        while (true) {
+            val currentValue = current.get()
+            if (currentValue < amount) return false
+
+            // Try to set new value; if another thread changed it, retry
+            if (current.compareAndSet(currentValue, currentValue - amount)) {
+                return true
+            }
+            // Another thread modified it; loop and retry
+        }
+    }
+
+    /**
+     * Try to spend multiple resources at once.
+     * All-or-nothing: either all costs are paid or none are.
+     */
+    fun trySpendMultiple(team: Team, costs: Map<Resource, Int>): Boolean {
+        // First, check if we can afford everything
+        for ((resource, amount) in costs) {
+            if (getResource(team, resource) < amount) {
+                return false
+            }
+        }
+
+        // Then spend (this isn't perfectly atomic, but good enough for games)
+        for ((resource, amount) in costs) {
+            if (!trySpend(team, resource, amount)) {
+                // Rollback what we've spent (simplified - real impl would track)
+                return false
+            }
+        }
+        return true
+    }
+
+    fun getResource(team: Team, resource: Resource): Int {
+        return teamResources[team]?.get(resource)?.get() ?: 0
+    }
+
+    fun getAllResources(team: Team): Map<Resource, Int> {
+        return teamResources[team]?.mapValues { it.value.get() } ?: emptyMap()
+    }
+
+    /**
+     * Reset all resources (for new game).
+     */
+    fun reset() {
+        teamResources.clear()
+        Team.playableTeams.forEach { initializeTeam(it) }
+    }
+}
+```
+
+**Why `AtomicInteger`?**
+Consider this race condition:
+1. Player A checks gold: 100
+2. Player B checks gold: 100
+3. Player A spends 80: sets to 20
+4. Player B spends 80: sets to 20 (should fail!)
+
+`AtomicInteger.compareAndSet` prevents this by only updating if the value hasn't changed since we read it.
+
+---
+
+## Step 6: Create the Game Manager
+
+Orchestrates all subsystems:
+
+```kotlin
+import com.hypixel.hytale.server.core.HytaleServer
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+
+/**
+ * Central coordinator for the RTS game.
+ *
+ * The "Facade" pattern: provides a simple interface
+ * to a complex subsystem (all the managers).
+ */
+class GameManager(private val plugin: JavaPlugin) {
+
+    val teamManager = TeamManager(plugin)
+    val resourceManager = ResourceManager(plugin)
+    // BuildingManager and UnitManager added in later parts
+
+    private var gameLoopTask: ScheduledFuture<*>? = null
+    private var tickCount = 0
+
+    /**
+     * Start the game systems.
+     */
+    fun start() {
+        // Initialize team resources
+        Team.playableTeams.forEach { team ->
+            resourceManager.initializeTeam(team)
+        }
+
+        // Start game loop
+        startGameLoop()
+
+        plugin.logger.atInfo().log("GameManager started")
+    }
+
+    /**
+     * The game loop runs every second.
+     *
+     * Why a fixed interval?
+     * - Predictable timing for game mechanics
+     * - Easier to reason about (10 ticks = 10 seconds)
+     * - Passive income, building progress, etc. need regular updates
+     */
+    private fun startGameLoop() {
+        gameLoopTask = HytaleServer.SCHEDULED_EXECUTOR.scheduleAtFixedRate({
+            try {
+                tick()
+            } catch (e: Exception) {
+                plugin.logger.atSevere().withCause(e).log("Game loop error")
+            }
+        }, 1, 1, TimeUnit.SECONDS)
+
+        plugin.taskRegistry.registerTask(gameLoopTask!!)
+    }
+
+    /**
+     * Called every second.
+     */
+    private fun tick() {
+        tickCount++
+
+        // Passive gold income every 10 seconds
+        if (tickCount % 10 == 0) {
+            distributePassiveIncome()
+        }
+
+        // Could add: building construction progress, unit production, etc.
+    }
+
+    /**
+     * Give each team passive gold income.
+     * Keeps the game moving even if players aren't gathering.
+     */
+    private fun distributePassiveIncome() {
+        Team.playableTeams.forEach { team ->
+            val playerCount = teamManager.getTeamCount(team)
+            if (playerCount > 0) {
+                // 1 gold per player on the team
+                resourceManager.addResource(team, Resource.GOLD, playerCount)
+            }
+        }
+    }
+
+    fun stop() {
+        gameLoopTask?.cancel(false)
+        plugin.logger.atInfo().log("GameManager stopped")
+    }
+}
+```
+
+---
+
+## Step 7: Handle Resource Gathering
+
+When players break blocks, they should gain resources:
+
+```kotlin
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+
+class RTSPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    lateinit var gameManager: GameManager
+        private set
+
+    override fun setup() {
+        gameManager = GameManager(this)
+
+        registerEvents()
+    }
+
+    private fun registerEvents() {
+        // Resource gathering from block breaking
+        eventRegistry.register(BreakBlockEvent::class.java) { event ->
+            val playerRef = event.playerRef ?: return@register
+            val uuid = playerRef.uuid
+
+            // Get player's team
+            val team = gameManager.teamManager.getTeam(uuid)
+            if (team == Team.NONE) return@register
+
+            // Check if this block yields resources
+            val blockType = event.blockType.toString()
+            val resource = Resource.fromBlockType(blockType) ?: return@register
+
+            // Calculate yield (could vary by tool, skill, etc.)
+            val amount = calculateYield(blockType)
+
+            // Add to team pool
+            gameManager.resourceManager.addResource(team, resource, amount)
+
+            // Track personal stats
+            gameManager.teamManager.getPlayerData(uuid)?.addGathered(resource, amount)
+
+            // Notify player
+            val player = playerRef.holder?.getComponent(Player.getComponentType())
+            player?.sendMessage(Message.raw("+$amount ${resource.displayName}"))
+        }
+    }
+
+    /**
+     * Calculate resource yield from a block.
+     *
+     * This is where you'd add:
+     * - Tool bonuses (iron pickaxe = more stone)
+     * - Skill bonuses (experienced gatherers get more)
+     * - Random variation (1-3 instead of flat 2)
+     */
+    private fun calculateYield(blockType: String): Int {
+        return when {
+            blockType.contains("Ore") -> 3  // Ores are valuable
+            blockType.contains("Log") -> 2  // Trees give decent wood
+            else -> 1                        // Default
+        }
+    }
+
+    override fun start() {
+        gameManager.start()
+        logger.atInfo().log("RTSPlugin started")
+    }
+
+    override fun shutdown() {
+        gameManager.stop()
+        logger.atInfo().log("RTSPlugin shutdown")
+    }
+}
+```
+
+---
+
+## Step 8: Add Player Join/Leave Handling
+
+```kotlin
+import com.hypixel.hytale.server.core.event.events.player.PlayerReadyEvent
+import com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent
+
+// Add to registerEvents():
+
+eventRegistry.register(PlayerReadyEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+
+    // Delay to ensure player is fully loaded
+    HytaleServer.SCHEDULED_EXECUTOR.schedule({
+        val team = gameManager.teamManager.addPlayer(playerRef)
+
+        val player = playerRef.holder?.getComponent(Player.getComponentType())
+        player?.sendMessage(Message.raw("Welcome to RTS Battle!"))
+        player?.sendMessage(Message.raw("You joined ${team.displayName}"))
+        player?.sendMessage(Message.raw("Break blocks to gather resources for your team!"))
+
+        // Show current resources
+        showResources(playerRef, team)
+    }, 2, TimeUnit.SECONDS)
+}
+
+eventRegistry.register(PlayerDisconnectEvent::class.java) { event ->
+    val playerRef = event.playerRef ?: return@register
+    gameManager.teamManager.removePlayer(playerRef.uuid)
+}
+```
+
+---
+
+## Step 9: Resource Display Command
+
+```kotlin
+import com.hypixel.hytale.server.core.command.system.CommandContext
+import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand
+import com.hypixel.hytale.server.core.universe.PlayerRef
+import com.hypixel.hytale.server.core.universe.world.World
+import com.hypixel.hytale.server.core.universe.world.storage.EntityStore
+import hytale.ecs.Ref
+import hytale.ecs.Store
+
+class ResourcesCommand(private val plugin: RTSPlugin) : AbstractPlayerCommand(
+    "resources",
+    "View your team's resources"
+) {
+    init {
+        addAliases("res", "r")
+    }
+
+    override fun execute(
+        context: CommandContext,
+        store: Store<EntityStore>,
+        ref: Ref<EntityStore>,
+        playerRef: PlayerRef,
+        world: World
+    ) {
+        val team = plugin.gameManager.teamManager.getTeam(playerRef.uuid)
+
+        if (team == Team.NONE) {
+            context.sendMessage(Message.raw("You're not on a team!"))
+            return
+        }
+
+        context.sendMessage(Message.raw("=== ${team.displayName} Resources ==="))
+
+        val resources = plugin.gameManager.resourceManager.getAllResources(team)
+        Resource.values().forEach { resource ->
+            val amount = resources[resource] ?: 0
+            context.sendMessage(Message.raw("${resource.displayName}: $amount"))
+        }
+    }
+}
+
+// Register in setup():
+commandRegistry.registerCommand(ResourcesCommand(this))
+```
+
+---
+
+## Complete Code
+
+All models in `Models.kt`:
+
+```kotlin
+package com.example.rts
+
+import java.util.UUID
+
+enum class Resource(val displayName: String) {
+    WOOD("Wood"),
+    STONE("Stone"),
+    IRON("Iron"),
+    FOOD("Food"),
+    GOLD("Gold");
+
+    companion object {
+        fun fromBlockType(blockType: String): Resource? {
+            return when {
+                blockType.contains("Wood") || blockType.contains("Log") -> WOOD
+                blockType.contains("Stone") || blockType.contains("Rock") -> STONE
+                blockType.contains("Iron") || blockType.contains("Ore") -> IRON
+                blockType.contains("Wheat") || blockType.contains("Crop") -> FOOD
+                else -> null
+            }
+        }
+    }
+}
+
+enum class Team(val displayName: String, val colorCode: String) {
+    RED("Red Team", "§c"),
+    BLUE("Blue Team", "§9"),
+    NONE("Unassigned", "§7");
+
+    companion object {
+        val playableTeams = listOf(RED, BLUE)
+    }
+}
+
+data class PlayerData(
+    val uuid: UUID,
+    val username: String,
+    var team: Team = Team.NONE,
+    var resourcesGathered: MutableMap<Resource, Int> = mutableMapOf()
+) {
+    fun addGathered(resource: Resource, amount: Int) {
+        resourcesGathered.merge(resource, amount, Int::plus)
+    }
+
+    fun getTotalGathered(): Int = resourcesGathered.values.sum()
+}
+```
+
+---
+
+## Key Concepts Explained
+
+### Why Separate Managers?
+
+```
+Bad: Everything in one class
+GameManager {
+    players, teams, resources, buildings, units, combat...
+    // 2000 lines, impossible to maintain
+}
+
+Good: Single responsibility
+TeamManager     → player/team state only
+ResourceManager → resource state only
+BuildingManager → building state only
+```
+
+### Why ConcurrentHashMap?
+
+```kotlin
+// Thread A (PlayerConnectEvent)
+players.put(uuid, data)
+
+// Thread B (BreakBlockEvent) - same instant
+players.get(uuid)  // Might see stale data with HashMap!
+
+// ConcurrentHashMap guarantees visibility
+```
+
+### Why AtomicInteger for Resources?
+
+```kotlin
+// Without atomic:
+if (gold >= 100) {     // Thread A: true
+    gold -= 100        // Thread A: gold = 0
+}
+if (gold >= 100) {     // Thread B: true (read before A's write)
+    gold -= 100        // Thread B: gold = -100 !!
+}
+
+// With AtomicInteger.compareAndSet:
+// Only one thread succeeds; other retries and sees updated value
+```
+
+---
+
+## What's Next
+
+In [Part 2: Building System](/tutorials/rts-game-part2), we'll add:
+- Building types (Barracks, Farm, Tower)
+- Placement validation
+- Construction time
+- Building effects (production, defense)

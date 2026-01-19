@@ -1,0 +1,301 @@
+---
+title: Manipulating Blocks
+description: Get and set blocks, work with chunks and world data
+---
+
+**Goal:** Read and modify blocks in the world, handle chunk access.
+
+**Prerequisites:** [Spawning Entities](/spawning-entities)
+
+## Step 1: Understand World Structure
+
+```
+Universe
+└── World (runs on dedicated thread)
+    └── ChunkStore
+        └── WorldChunk (16x256x16 blocks)
+            └── BlockState (block type + properties)
+```
+
+## Step 2: Get a World Reference
+
+```kotlin
+import com.hypixel.hytale.server.core.universe.Universe
+import com.hypixel.hytale.server.core.universe.world.World
+
+// Get world by name
+val world = Universe.get().worlds["default"]
+
+// Get all worlds
+val allWorlds = Universe.get().worlds
+```
+
+## Step 3: Access Chunks
+
+Convert world coordinates to chunk coordinates:
+
+```kotlin
+fun getChunkCoords(x: Int, z: Int): Pair<Int, Int> {
+    return Pair(x shr 4, z shr 4)  // Divide by 16
+}
+
+// Get chunk at position
+val chunk = world.getChunk(chunkX, chunkZ)
+```
+
+Async chunk access (recommended):
+
+```kotlin
+world.getChunkAsync(chunkIndex).thenAccept { chunk ->
+    // Process chunk
+}
+```
+
+## Step 4: Read Blocks
+
+```kotlin
+import com.hypixel.hytale.server.core.universe.world.chunk.WorldChunk
+
+fun getBlock(world: World, x: Int, y: Int, z: Int): BlockState? {
+    val chunkX = x shr 4
+    val chunkZ = z shr 4
+    val chunk = world.getChunk(chunkX, chunkZ) ?: return null
+
+    // Local coordinates within chunk (0-15)
+    val localX = x and 15
+    val localZ = z and 15
+
+    return chunk.getBlockState(localX, y, localZ)
+}
+```
+
+## Step 5: Set Blocks
+
+```kotlin
+import com.hypixel.hytale.server.core.asset.type.blocktype.config.BlockType
+
+fun setBlock(world: World, x: Int, y: Int, z: Int, blockType: BlockType) {
+    world.execute {
+        val chunkX = x shr 4
+        val chunkZ = z shr 4
+        val chunk = world.getChunk(chunkX, chunkZ) ?: return@execute
+
+        val localX = x and 15
+        val localZ = z and 15
+
+        chunk.setBlock(localX, y, localZ, blockType, 0)  // 0 = rotation
+        chunk.markNeedsSaving()
+    }
+}
+```
+
+## Step 6: Get Block Type by Name
+
+```kotlin
+fun getBlockType(name: String): BlockType? {
+    return BlockType.getAssetMap().getAsset(name)
+}
+
+// Usage
+val stone = getBlockType("Rock_Stone")
+val planks = getBlockType("Wood_Planks")
+```
+
+## Step 7: Fill a Region
+
+```kotlin
+fun fillRegion(
+    world: World,
+    x1: Int, y1: Int, z1: Int,
+    x2: Int, y2: Int, z2: Int,
+    blockType: BlockType
+) {
+    world.execute {
+        val minX = minOf(x1, x2)
+        val maxX = maxOf(x1, x2)
+        val minY = minOf(y1, y2)
+        val maxY = maxOf(y1, y2)
+        val minZ = minOf(z1, z2)
+        val maxZ = maxOf(z1, z2)
+
+        for (x in minX..maxX) {
+            for (y in minY..maxY) {
+                for (z in minZ..maxZ) {
+                    setBlockDirect(world, x, y, z, blockType)
+                }
+            }
+        }
+    }
+}
+
+private fun setBlockDirect(world: World, x: Int, y: Int, z: Int, blockType: BlockType) {
+    val chunkX = x shr 4
+    val chunkZ = z shr 4
+    val chunk = world.getChunk(chunkX, chunkZ) ?: return
+
+    chunk.setBlock(x and 15, y, z and 15, blockType, 0)
+    chunk.markNeedsSaving()
+}
+```
+
+## Step 8: Listen to Block Events
+
+```kotlin
+import com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent
+import com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent
+
+// Block placed
+eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+    val position = event.position
+    val blockType = event.blockType
+    logger.atInfo().log("Block placed at $position: ${blockType.name}")
+}
+
+// Block broken
+eventRegistry.register(BreakBlockEvent::class.java) { event ->
+    val position = event.position
+    logger.atInfo().log("Block broken at $position")
+
+    // Cancel to prevent breaking
+    // event.cancel()
+}
+```
+
+## Complete Example
+
+A simple build protection plugin:
+
+```kotlin
+package com.example.myplugin
+
+import com.hypixel.hytale.server.core.Message
+import com.hypixel.hytale.server.core.asset.type.blocktype.config.BlockType
+import com.hypixel.hytale.server.core.entity.entities.Player
+import com.hypixel.hytale.server.core.event.events.ecs.BreakBlockEvent
+import com.hypixel.hytale.server.core.event.events.ecs.PlaceBlockEvent
+import com.hypixel.hytale.server.core.plugin.JavaPlugin
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit
+import com.hypixel.hytale.server.core.universe.Universe
+import org.joml.Vector3d
+
+class BuildPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+
+    // Protected region (spawn area)
+    private val protectedRegion = Region(
+        Vector3d(-50.0, 0.0, -50.0),
+        Vector3d(50.0, 256.0, 50.0)
+    )
+
+    data class Region(val min: Vector3d, val max: Vector3d) {
+        fun contains(x: Double, y: Double, z: Double): Boolean {
+            return x >= min.x && x <= max.x &&
+                   y >= min.y && y <= max.y &&
+                   z >= min.z && z <= max.z
+        }
+    }
+
+    override fun setup() {
+        // Protect blocks from being broken
+        eventRegistry.register(BreakBlockEvent::class.java) { event ->
+            val pos = event.position
+            if (protectedRegion.contains(pos.x, pos.y, pos.z)) {
+                if (!hasPermission(event, "build.bypass")) {
+                    event.cancel()
+                    notifyPlayer(event, "This area is protected!")
+                }
+            }
+        }
+
+        // Protect blocks from being placed
+        eventRegistry.register(PlaceBlockEvent::class.java) { event ->
+            val pos = event.position
+            if (protectedRegion.contains(pos.x, pos.y, pos.z)) {
+                if (!hasPermission(event, "build.bypass")) {
+                    event.cancel()
+                    notifyPlayer(event, "This area is protected!")
+                }
+            }
+        }
+    }
+
+    private fun hasPermission(event: Any, permission: String): Boolean {
+        // Check player permission
+        return false  // Implement based on your permission system
+    }
+
+    private fun notifyPlayer(event: Any, message: String) {
+        // Send message to player who triggered the event
+    }
+
+    // Command to place blocks
+    fun placeBlock(world: World, x: Int, y: Int, z: Int, blockName: String) {
+        val blockType = BlockType.getAssetMap().getAsset(blockName) ?: return
+
+        world.execute {
+            val chunkX = x shr 4
+            val chunkZ = z shr 4
+            val chunk = world.getChunk(chunkX, chunkZ) ?: return@execute
+
+            chunk.setBlock(x and 15, y, z and 15, blockType, 0)
+            chunk.markNeedsSaving()
+        }
+    }
+
+    override fun start() {
+        logger.atInfo().log("BuildPlugin started")
+    }
+
+    override fun shutdown() {
+        logger.atInfo().log("BuildPlugin shutdown")
+    }
+}
+```
+
+## World Properties
+
+```kotlin
+val world: World = Universe.get().worlds["default"]!!
+
+// World info
+val name = world.name
+val tick = world.tick
+val isPaused = world.isPaused
+
+// Players in world
+val players = world.players  // Map<UUID, PlayerRef>
+
+// World config
+val config = world.worldConfig
+val seed = config.seed
+val viewDistance = config.viewDistance
+```
+
+## Thread Safety
+
+Worlds run on dedicated threads. Always access world data safely:
+
+```kotlin
+// Check if on world thread
+if (world.isInThread()) {
+    // Safe to access directly
+}
+
+// Execute on world thread (recommended)
+world.execute {
+    // Safe here
+    chunk.setBlock(x, y, z, blockType, 0)
+}
+```
+
+## Chunk Lifecycle
+
+1. **Load** - Chunk loaded from disk or generated
+2. **Populate** - Structures and features added
+3. **Tick** - Active if players nearby
+4. **Unload** - Saved to disk when no players nearby
+
+## Next Steps
+
+- [Scheduling Tasks](/scheduling-tasks) - Delayed world modifications
+- [Handling Events](/handling-events) - Block events
+- [Custom Components](/custom-components) - Block components

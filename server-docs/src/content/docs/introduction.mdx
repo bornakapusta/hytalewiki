@@ -1,0 +1,43 @@
+---
+title: Introduction
+description: Learn what you can build with the Hytale Server Plugin API
+---
+
+The Hytale Server Plugin API lets you create custom game modes, events, and server functionality using Kotlin (or Java).
+
+## What You Can Build
+
+- **Game modes** - PvP arenas, survival variants, mini-games, RTS games
+- **Custom commands** - Admin tools, teleportation, player management
+- **Economy systems** - Shops, trading, currencies
+- **Event listeners** - React to player actions, world changes, combat
+- **Scheduled tasks** - Timers, countdowns, periodic events
+- **Custom entities** - NPCs, mobs with custom behavior
+- **World manipulation** - Build systems, terrain modification
+
+## Prerequisites
+
+- **Kotlin** (or Java) - Examples use Kotlin
+- **Gradle** - Build tool for compiling plugins
+- **Java 25** - Required runtime version
+- **Hytale Server** - Download from Hytale
+
+## Architecture Overview
+
+The server uses an **Entity Component System (ECS)** architecture:
+
+- **Entities** - Players, mobs, items are entities
+- **Components** - Data attached to entities (position, health, inventory)
+- **Systems** - Process entities with specific components each tick
+
+Key concepts:
+- Each **World** runs on a dedicated thread
+- **Events** are dispatched to registered listeners
+- **Commands** are registered through `CommandRegistry`
+- **Tasks** can be scheduled for delayed or repeated execution
+
+## Next Steps
+
+1. [Your First Plugin](/your-first-plugin) - Build a complete plugin from scratch
+2. [Project Setup](/project-setup) - Configure Gradle and dependencies
+3. [Handling Events](/handling-events) - Respond to player actions
