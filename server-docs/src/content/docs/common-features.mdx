@@ -1,0 +1,438 @@
+---
+title: Common Features
+description: Utility patterns for placeholders, translations, and common plugin features
+---
+
+Common patterns for features most plugins need: placeholders, translations, utility classes, and player management.
+
+## Placeholder System
+
+Create a placeholder system for dynamic text:
+
+```kotlin
+object PlaceholderManager {
+    private val placeholders = mutableMapOf<String, (PlayerRef) -> String>()
+
+    fun register(name: String, resolver: (PlayerRef) -> String) {
+        placeholders[name.lowercase()] = resolver
+    }
+
+    fun resolve(text: String, playerRef: PlayerRef): String {
+        var result = text
+        val pattern = Regex("%([a-zA-Z_]+)%")
+
+        pattern.findAll(text).forEach { match ->
+            val name = match.groupValues[1].lowercase()
+            placeholders[name]?.let { resolver ->
+                result = result.replace(match.value, resolver(playerRef))
+            }
+        }
+        return result
+    }
+}
+```
+
+### Register Placeholders
+
+```kotlin
+override fun setup() {
+    // Built-in placeholders
+    PlaceholderManager.register("player") { playerRef ->
+        playerRef.holder?.getComponent(PlayerComponentType)?.name ?: "Unknown"
+    }
+
+    PlaceholderManager.register("health") { playerRef ->
+        val health = playerRef.holder?.getComponent(HealthComponentType)
+        "${health?.current?.toInt() ?: 0}"
+    }
+
+    PlaceholderManager.register("online") { _ ->
+        "${server.onlinePlayers.size}"
+    }
+
+    // Custom plugin placeholders
+    PlaceholderManager.register("kills") { playerRef ->
+        val stats = playerRef.holder?.getComponent(StatsComponentType)
+        "${stats?.kills ?: 0}"
+    }
+}
+```
+
+### Usage
+
+```kotlin
+val message = PlaceholderManager.resolve(
+    "Welcome %player%! You have %kills% kills.",
+    playerRef
+)
+// "Welcome Steve! You have 42 kills."
+```
+
+## Translation / i18n
+
+Support multiple languages with a message system:
+
+```kotlin
+class MessageManager(private val plugin: JavaPlugin) {
+    private val messages = mutableMapOf<String, MutableMap<String, String>>()
+    private var defaultLocale = "en"
+
+    fun load() {
+        // Load from config files
+        val enMessages = plugin.withConfig("messages/en", MessagesCodec)
+        val esMessages = plugin.withConfig("messages/es", MessagesCodec)
+
+        messages["en"] = enMessages.messages
+        messages["es"] = esMessages.messages
+    }
+
+    fun get(key: String, locale: String = defaultLocale): String {
+        return messages[locale]?.get(key)
+            ?: messages[defaultLocale]?.get(key)
+            ?: key
+    }
+
+    fun send(playerRef: PlayerRef, key: String, vararg args: Any) {
+        val locale = getPlayerLocale(playerRef)
+        var message = get(key, locale)
+
+        // Replace indexed placeholders {0}, {1}, etc.
+        args.forEachIndexed { index, arg ->
+            message = message.replace("{$index}", arg.toString())
+        }
+
+        playerRef.holder?.getComponent(PlayerComponentType)?.let { player ->
+            player.sendMessage(Message.raw(message))
+        }
+    }
+
+    private fun getPlayerLocale(playerRef: PlayerRef): String {
+        // Get from player settings component or default
+        return playerRef.holder?.getComponent(SettingsComponentType)?.locale
+            ?: defaultLocale
+    }
+}
+```
+
+### Message Files
+
+`messages/en.json`:
+```json
+{
+    "messages": {
+        "welcome": "Welcome to the server, {0}!",
+        "join": "{0} has joined the game",
+        "leave": "{0} has left the game",
+        "kill": "{0} was slain by {1}",
+        "no_permission": "You don't have permission to do that."
+    }
+}
+```
+
+`messages/es.json`:
+```json
+{
+    "messages": {
+        "welcome": "¡Bienvenido al servidor, {0}!",
+        "join": "{0} se ha unido al juego",
+        "leave": "{0} ha salido del juego",
+        "kill": "{0} fue asesinado por {1}",
+        "no_permission": "No tienes permiso para hacer eso."
+    }
+}
+```
+
+### Usage
+
+```kotlin
+messageManager.send(playerRef, "welcome", playerName)
+messageManager.send(playerRef, "kill", victimName, killerName)
+```
+
+## Utility Classes
+
+### TimeUtils
+
+```kotlin
+object TimeUtils {
+    fun formatDuration(seconds: Int): String {
+        val hours = seconds / 3600
+        val minutes = (seconds % 3600) / 60
+        val secs = seconds % 60
+
+        return when {
+            hours > 0 -> "%d:%02d:%02d".format(hours, minutes, secs)
+            else -> "%d:%02d".format(minutes, secs)
+        }
+    }
+
+    fun formatRelative(seconds: Int): String {
+        return when {
+            seconds < 60 -> "${seconds}s"
+            seconds < 3600 -> "${seconds / 60}m ${seconds % 60}s"
+            seconds < 86400 -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
+            else -> "${seconds / 86400}d ${(seconds % 86400) / 3600}h"
+        }
+    }
+
+    fun parseTime(input: String): Int? {
+        val regex = Regex("(\\d+)([smhd])")
+        var totalSeconds = 0
+
+        regex.findAll(input.lowercase()).forEach { match ->
+            val value = match.groupValues[1].toInt()
+            val unit = match.groupValues[2]
+            totalSeconds += when (unit) {
+                "s" -> value
+                "m" -> value * 60
+                "h" -> value * 3600
+                "d" -> value * 86400
+                else -> 0
+            }
+        }
+        return if (totalSeconds > 0) totalSeconds else null
+    }
+}
+```
+
+Usage:
+```kotlin
+TimeUtils.formatDuration(3661)     // "1:01:01"
+TimeUtils.formatRelative(3661)    // "1h 1m"
+TimeUtils.parseTime("1h30m")      // 5400
+```
+
+### NumberUtils
+
+```kotlin
+object NumberUtils {
+    fun formatCompact(number: Long): String {
+        return when {
+            number >= 1_000_000_000 -> "%.1fB".format(number / 1_000_000_000.0)
+            number >= 1_000_000 -> "%.1fM".format(number / 1_000_000.0)
+            number >= 1_000 -> "%.1fK".format(number / 1_000.0)
+            else -> number.toString()
+        }
+    }
+
+    fun formatWithCommas(number: Long): String {
+        return "%,d".format(number)
+    }
+
+    fun parseNumber(input: String): Long? {
+        val clean = input.lowercase().replace(",", "")
+        val multiplier = when {
+            clean.endsWith("k") -> 1_000L
+            clean.endsWith("m") -> 1_000_000L
+            clean.endsWith("b") -> 1_000_000_000L
+            else -> 1L
+        }
+        val numPart = clean.trimEnd('k', 'm', 'b')
+        return numPart.toDoubleOrNull()?.let { (it * multiplier).toLong() }
+    }
+}
+```
+
+### ColorUtils
+
+```kotlin
+object ColorUtils {
+    // Convert hex to RGB components
+    fun hexToRgb(hex: String): Triple<Int, Int, Int>? {
+        val clean = hex.removePrefix("#")
+        if (clean.length != 6) return null
+
+        return try {
+            val r = clean.substring(0, 2).toInt(16)
+            val g = clean.substring(2, 4).toInt(16)
+            val b = clean.substring(4, 6).toInt(16)
+            Triple(r, g, b)
+        } catch (e: NumberFormatException) {
+            null
+        }
+    }
+
+    fun rgbToHex(r: Int, g: Int, b: Int): String {
+        return "#%02X%02X%02X".format(r, g, b)
+    }
+
+    // Interpolate between two colors
+    fun lerp(color1: Triple<Int, Int, Int>,
+             color2: Triple<Int, Int, Int>,
+             t: Float): Triple<Int, Int, Int> {
+        val r = (color1.first + (color2.first - color1.first) * t).toInt()
+        val g = (color1.second + (color2.second - color1.second) * t).toInt()
+        val b = (color1.third + (color2.third - color1.third) * t).toInt()
+        return Triple(r.coerceIn(0, 255), g.coerceIn(0, 255), b.coerceIn(0, 255))
+    }
+}
+```
+
+## First Join Detection
+
+Track when players first join:
+
+```kotlin
+class FirstJoinComponent : Component<EntityStore> {
+    var firstJoinTime: Long = 0
+    var hasJoinedBefore: Boolean = false
+
+    override fun clone() = FirstJoinComponent().also {
+        it.firstJoinTime = firstJoinTime
+        it.hasJoinedBefore = hasJoinedBefore
+    }
+    override fun cloneSerializable() = clone()
+}
+
+// In plugin setup
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val holder = event.holder
+    val firstJoin = holder.getComponent(FirstJoinComponentType)
+
+    if (firstJoin == null) {
+        // First time joining
+        holder.addComponent(FirstJoinComponentType, FirstJoinComponent().apply {
+            firstJoinTime = System.currentTimeMillis()
+            hasJoinedBefore = true
+        })
+
+        // Give starter kit, show tutorial, etc.
+        giveStarterKit(holder)
+        showWelcomeTutorial(event.playerRef)
+    }
+}
+```
+
+## Ban / Mute System
+
+Simple punishment enforcement:
+
+```kotlin
+class PunishmentManager(private val plugin: JavaPlugin) {
+    private val bans = mutableMapOf<UUID, BanEntry>()
+    private val mutes = mutableMapOf<UUID, MuteEntry>()
+
+    data class BanEntry(val reason: String, val expiry: Long?, val bannedBy: String)
+    data class MuteEntry(val reason: String, val expiry: Long?, val mutedBy: String)
+
+    fun ban(uuid: UUID, reason: String, duration: Long?, bannedBy: String) {
+        val expiry = duration?.let { System.currentTimeMillis() + it }
+        bans[uuid] = BanEntry(reason, expiry, bannedBy)
+        save()
+
+        // Kick if online
+        kickPlayer(uuid, "Banned: $reason")
+    }
+
+    fun unban(uuid: UUID) {
+        bans.remove(uuid)
+        save()
+    }
+
+    fun isBanned(uuid: UUID): BanEntry? {
+        val entry = bans[uuid] ?: return null
+
+        // Check expiry
+        if (entry.expiry != null && System.currentTimeMillis() > entry.expiry) {
+            bans.remove(uuid)
+            save()
+            return null
+        }
+        return entry
+    }
+
+    fun mute(uuid: UUID, reason: String, duration: Long?, mutedBy: String) {
+        val expiry = duration?.let { System.currentTimeMillis() + it }
+        mutes[uuid] = MuteEntry(reason, expiry, mutedBy)
+        save()
+    }
+
+    fun isMuted(uuid: UUID): MuteEntry? {
+        val entry = mutes[uuid] ?: return null
+
+        if (entry.expiry != null && System.currentTimeMillis() > entry.expiry) {
+            mutes.remove(uuid)
+            save()
+            return null
+        }
+        return entry
+    }
+
+    private fun save() { /* Save to config */ }
+    private fun kickPlayer(uuid: UUID, reason: String) { /* Kick logic */ }
+}
+```
+
+### Enforce on Connect
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val uuid = event.uuid
+
+    punishmentManager.isBanned(uuid)?.let { ban ->
+        event.cancel()
+        event.disconnectReason = "Banned: ${ban.reason}"
+        return@register
+    }
+}
+```
+
+### Enforce Mute on Chat
+
+```kotlin
+eventRegistry.register(PlayerChatEvent::class.java) { event ->
+    val uuid = getPlayerUuid(event.playerRef) ?: return@register
+
+    punishmentManager.isMuted(uuid)?.let { mute ->
+        event.cancel()
+        sendMessage(event.playerRef, "You are muted: ${mute.reason}")
+    }
+}
+```
+
+## Chat Channels
+
+Simple channel system:
+
+```kotlin
+class ChatChannelManager {
+    private val channels = mutableMapOf<String, ChatChannel>()
+    private val playerChannels = mutableMapOf<UUID, String>()
+
+    data class ChatChannel(
+        val name: String,
+        val prefix: String,
+        val permission: String?,
+        val radius: Double?  // null = global
+    )
+
+    init {
+        // Default channels
+        channels["global"] = ChatChannel("Global", "[G]", null, null)
+        channels["local"] = ChatChannel("Local", "[L]", null, 100.0)
+        channels["staff"] = ChatChannel("Staff", "[S]", "chat.staff", null)
+    }
+
+    fun setChannel(uuid: UUID, channel: String) {
+        if (channels.containsKey(channel)) {
+            playerChannels[uuid] = channel
+        }
+    }
+
+    fun getChannel(uuid: UUID): ChatChannel {
+        val channelName = playerChannels[uuid] ?: "global"
+        return channels[channelName] ?: channels["global"]!!
+    }
+
+    fun formatMessage(channel: ChatChannel, sender: String, message: String): String {
+        return "${channel.prefix} $sender: $message"
+    }
+}
+```
+
+## See Also
+
+- [Config Files](/config-files) - Persist settings and data
+- [Handling Events](/handling-events) - Event system basics
+- [Creating Commands](/creating-commands) - Add commands for features
+- [Advanced Patterns](/advanced-patterns) - Production patterns

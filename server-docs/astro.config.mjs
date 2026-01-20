@@ -27,6 +27,10 @@ export default defineConfig({
 						{ label: 'Manipulating Blocks', slug: 'manipulating-blocks' },
 						{ label: 'Scheduling Tasks', slug: 'scheduling-tasks' },
 						{ label: 'Custom Components', slug: 'custom-components' },
+						{ label: 'ECS Theory', slug: 'ecs-theory' },
+						{ label: 'Config Files', slug: 'config-files' },
+						{ label: 'Common Features', slug: 'common-features' },
+						{ label: 'Gradle & Testing', slug: 'gradle-testing' },
 					],
 				},
 				{
@@ -69,6 +73,7 @@ export default defineConfig({
 						{ label: 'ECS Components', slug: 'ecs-components' },
 						{ label: 'System Types', slug: 'system-types' },
 						{ label: 'Network Protocol', slug: 'protocol-api' },
+						{ label: 'External Resources', slug: 'resources' },
 					],
 				},
 				{
@@ -77,6 +82,8 @@ export default defineConfig({
 						{ label: 'Advanced ECS Patterns', slug: 'advanced-ecs' },
 						{ label: 'Built-in Modules', slug: 'builtin-modules' },
 						{ label: 'Asset System', slug: 'asset-system' },
+						{ label: 'Bootstrap Plugins', slug: 'bootstrap-plugins' },
+						{ label: 'Production Patterns', slug: 'advanced-patterns' },
 					],
 				},
 				{

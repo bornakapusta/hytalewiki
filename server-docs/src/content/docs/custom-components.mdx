@@ -329,6 +329,130 @@ if (holder.getComponent(INVULNERABLE) != null) {
 }
 ```
 
+## Example: Poison Component
+
+A complete example showing a component with a system that processes it:
+
+### PoisonComponent
+
+```kotlin
+class PoisonComponent : Component<EntityStore> {
+    var damagePerTick: Float = 1f
+    var ticksRemaining: Int = 100  // 5 seconds at 20 TPS
+    var source: UUID? = null       // Who applied the poison
+
+    override fun clone() = PoisonComponent().also {
+        it.damagePerTick = damagePerTick
+        it.ticksRemaining = ticksRemaining
+        it.source = source
+    }
+
+    override fun cloneSerializable() = clone()
+
+    companion object {
+        val CODEC: BuilderCodec<PoisonComponent> = BuilderCodec.builder(
+            PoisonComponent::class.java,
+            { PoisonComponent() }
+        )
+            .append(KeyedCodec("damagePerTick", Codec.FLOAT),
+                { o, v -> o.damagePerTick = v }, { o -> o.damagePerTick })
+            .append(KeyedCodec("ticksRemaining", Codec.INT),
+                { o, v -> o.ticksRemaining = v }, { o -> o.ticksRemaining })
+            .add()
+            .build()
+    }
+}
+```
+
+### PoisonSystem
+
+```kotlin
+class PoisonSystem : EntityTickingSystem<EntityStore>() {
+    companion object {
+        lateinit var POISON: ComponentType<EntityStore, PoisonComponent>
+    }
+
+    override fun getQuery(): Query<EntityStore> {
+        // Only process entities with both Poison and Health
+        return Query.and(POISON, HealthComponentType)
+    }
+
+    override fun tick(
+        deltaTime: Float,
+        tick: Int,
+        index: Int,
+        chunk: ArchetypeChunk<EntityStore>,
+        store: Store<EntityStore>,
+        buffer: CommandBuffer<EntityStore>
+    ) {
+        val poison = chunk.getComponent(index, POISON)
+        val health = chunk.getComponent(index, HealthComponentType)
+        val ref = chunk.getRef(index)
+
+        // Apply damage
+        health.current -= poison.damagePerTick
+
+        // Decrement duration
+        poison.ticksRemaining--
+
+        // Remove poison when expired
+        if (poison.ticksRemaining <= 0) {
+            buffer.removeComponent(ref, POISON)
+        }
+
+        // Check for death
+        if (health.current <= 0) {
+            buffer.addComponent(ref, DeathComponentType, DeathComponent().apply {
+                cause = DeathCause.POISON
+                killer = poison.source
+            })
+        }
+    }
+}
+```
+
+### Applying Poison
+
+```kotlin
+// Apply poison when hit by poison arrow
+eventRegistry.register(EntityHitEvent::class.java) { event ->
+    val projectile = event.projectile ?: return@register
+    if (!isPoisonArrow(projectile)) return@register
+
+    val targetRef = event.targetRef
+    val holder = targetRef.holder ?: return@register
+
+    // Add or refresh poison component
+    val existing = holder.getComponent(PoisonSystem.POISON)
+    if (existing != null) {
+        // Refresh duration, don't stack damage
+        existing.ticksRemaining = 100
+    } else {
+        holder.addComponent(PoisonSystem.POISON, PoisonComponent().apply {
+            damagePerTick = 1f
+            ticksRemaining = 100
+            source = getShooterUuid(projectile)
+        })
+    }
+}
+```
+
+### Register in Plugin
+
+```kotlin
+override fun setup() {
+    // Register component
+    PoisonSystem.POISON = componentRegistry.registerComponent(
+        PoisonComponent::class.java,
+        "PoisonComponent",
+        PoisonComponent.CODEC
+    )
+
+    // Register system
+    componentRegistry.registerSystem(PoisonSystem())
+}
+```
+
 ## Next Steps
 
 - [Component List](/ecs-components) - All built-in components

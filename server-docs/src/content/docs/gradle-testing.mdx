@@ -1,0 +1,438 @@
+---
+title: Gradle & Testing
+description: Build automation, custom Gradle tasks, and CI/CD for Hytale plugins
+---
+
+Optimize your development workflow with custom Gradle tasks, automated testing, and CI/CD pipelines.
+
+## Custom Gradle Plugin
+
+Create a reusable Gradle plugin in `buildSrc/` for common tasks:
+
+### Project Structure
+
+```
+my-plugin/
+├── buildSrc/
+│   ├── build.gradle.kts
+│   └── src/main/kotlin/
+│       └── HytalePlugin.kt
+├── build.gradle.kts
+└── src/
+```
+
+### buildSrc/build.gradle.kts
+
+```kotlin
+plugins {
+    `kotlin-dsl`
+}
+
+repositories {
+    mavenCentral()
+}
+```
+
+### buildSrc/src/main/kotlin/HytalePlugin.kt
+
+```kotlin
+import org.gradle.api.Plugin
+import org.gradle.api.Project
+import org.gradle.api.tasks.Exec
+import org.gradle.kotlin.dsl.*
+
+class HytalePlugin : Plugin<Project> {
+    override fun apply(project: Project) {
+        with(project) {
+            // Extension for configuration
+            val hytale = extensions.create<HytaleExtension>("hytale")
+
+            // Register tasks
+            tasks.register<Exec>("runServer") {
+                group = "hytale"
+                description = "Start the Hytale server with the plugin"
+                dependsOn("build")
+
+                workingDir = file(hytale.serverDir)
+                commandLine = listOf("java", "-jar", "HytaleServer.jar")
+
+                // Pass debug options if enabled
+                if (hytale.debug) {
+                    environment("JAVA_TOOL_OPTIONS",
+                        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005")
+                }
+            }
+
+            tasks.register("deployPlugin") {
+                group = "hytale"
+                description = "Build and copy plugin to server"
+                dependsOn("build")
+
+                doLast {
+                    copy {
+                        from(tasks.named("shadowJar"))
+                        into(file("${hytale.serverDir}/plugins"))
+                    }
+                    println("Plugin deployed to ${hytale.serverDir}/plugins")
+                }
+            }
+
+            tasks.register("cleanServer") {
+                group = "hytale"
+                description = "Clean server data (worlds, logs)"
+
+                doLast {
+                    delete(fileTree("${hytale.serverDir}/worlds"))
+                    delete(fileTree("${hytale.serverDir}/logs"))
+                    println("Server data cleaned")
+                }
+            }
+        }
+    }
+}
+
+open class HytaleExtension {
+    var serverDir: String = "hytale_server"
+    var debug: Boolean = false
+}
+```
+
+### Using the Plugin
+
+In your main `build.gradle.kts`:
+
+```kotlin
+plugins {
+    kotlin("jvm") version "2.3.0"
+    id("com.gradleup.shadow") version "9.0.0-beta12"
+}
+
+apply<HytalePlugin>()
+
+configure<HytaleExtension> {
+    serverDir = "hytale_server"
+    debug = true
+}
+```
+
+Run with:
+```bash
+./gradlew runServer      # Build and start server
+./gradlew deployPlugin   # Just deploy without starting
+./gradlew cleanServer    # Reset server data
+```
+
+## runServer Task with Caching
+
+Optimize the build-test cycle:
+
+```kotlin
+tasks.register<Exec>("runServer") {
+    group = "hytale"
+    description = "Run server with hot-reload support"
+    dependsOn("build")
+
+    workingDir = file("hytale_server")
+    commandLine = listOf(
+        "java",
+        "-Xmx4G",
+        "-XX:+UseG1GC",
+        "-jar", "HytaleServer.jar"
+    )
+
+    // Only rebuild if sources changed
+    inputs.files(fileTree("src"))
+    outputs.file("build/libs/${project.name}.jar")
+}
+```
+
+### Watch Mode
+
+Auto-rebuild on file changes:
+
+```kotlin
+tasks.register("watch") {
+    group = "hytale"
+    description = "Watch for changes and rebuild"
+
+    doLast {
+        exec {
+            // Use fswatch/inotify for file watching
+            commandLine = listOf(
+                "bash", "-c",
+                """
+                while true; do
+                    inotifywait -r -e modify,create,delete src/
+                    ./gradlew build --quiet
+                    echo "Rebuilt at $(date)"
+                done
+                """.trimIndent()
+            )
+        }
+    }
+}
+```
+
+## Build Optimizations
+
+### gradle.properties
+
+```properties
+# Parallel builds
+org.gradle.parallel=true
+
+# Build caching
+org.gradle.caching=true
+
+# Daemon for faster subsequent builds
+org.gradle.daemon=true
+
+# Memory settings
+org.gradle.jvmargs=-Xmx2g -XX:+HeapDumpOnOutOfMemoryError
+
+# Kotlin settings
+kotlin.incremental=true
+kotlin.caching.enabled=true
+kotlin.jvm.target=25
+```
+
+### Incremental Compilation
+
+```kotlin
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+    incremental = true
+    kotlinOptions {
+        jvmTarget = "25"
+        freeCompilerArgs = listOf("-Xjsr305=strict")
+    }
+}
+```
+
+### Configuration Cache
+
+Enable in `gradle.properties`:
+```properties
+org.gradle.configuration-cache=true
+```
+
+## CI/CD with GitHub Actions
+
+### Basic Build Workflow
+
+`.github/workflows/build.yml`:
+
+```yaml
+name: Build Plugin
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Build
+        run: ./gradlew build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-jar
+          path: build/libs/*.jar
+```
+
+### Release Workflow
+
+`.github/workflows/release.yml`:
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+
+      - name: Build
+        run: ./gradlew build
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: build/libs/*.jar
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Matrix Testing
+
+Test across multiple configurations:
+
+```yaml
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        java: ['25']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+
+      - name: Build
+        run: ./gradlew build
+```
+
+## Remote Debugging
+
+### Server Setup
+
+Start server with debug agent:
+
+```bash
+java -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005 \
+     -jar HytaleServer.jar
+```
+
+Or via Gradle task:
+
+```kotlin
+tasks.register<Exec>("runServerDebug") {
+    group = "hytale"
+    description = "Run server with debugger attached"
+    dependsOn("build")
+
+    workingDir = file("hytale_server")
+    commandLine = listOf(
+        "java",
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005",
+        "-Xmx4G",
+        "-jar", "HytaleServer.jar"
+    )
+}
+```
+
+### IntelliJ Configuration
+
+1. **Run > Edit Configurations**
+2. Click **+** > **Remote JVM Debug**
+3. Configure:
+   - Name: `Hytale Server`
+   - Host: `localhost`
+   - Port: `5005`
+   - Use module classpath: your plugin module
+
+4. Start server with `./gradlew runServerDebug`
+5. Click Debug button in IntelliJ
+
+### Debugging Tips
+
+- Set breakpoints in your plugin code
+- Use conditional breakpoints for specific entities
+- Watch expressions to inspect ECS state
+- Evaluate expressions in debug console
+
+## Unit Testing
+
+### Setup
+
+```kotlin
+dependencies {
+    testImplementation(kotlin("test"))
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
+    testImplementation("io.mockk:mockk:1.13.8")
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+```
+
+### Test Example
+
+```kotlin
+import io.mockk.*
+import org.junit.jupiter.api.Test
+import kotlin.test.assertEquals
+
+class PlayerStatsComponentTest {
+    @Test
+    fun `KD ratio calculates correctly`() {
+        val stats = PlayerStatsComponent().apply {
+            kills = 10
+            deaths = 2
+        }
+
+        assertEquals(5.0, stats.getKDRatio())
+    }
+
+    @Test
+    fun `KD ratio handles zero deaths`() {
+        val stats = PlayerStatsComponent().apply {
+            kills = 10
+            deaths = 0
+        }
+
+        assertEquals(10.0, stats.getKDRatio())
+    }
+}
+```
+
+### Mocking ECS Components
+
+```kotlin
+@Test
+fun `damage system reduces health`() {
+    val health = mockk<HealthComponent>(relaxed = true)
+    every { health.current } returns 100f
+
+    // Test your damage logic
+    applyDamage(health, 25f)
+
+    verify { health.current = 75f }
+}
+```
+
+## See Also
+
+- [Project Setup](/project-setup) - Basic project structure
+- [Bootstrap Plugins](/bootstrap-plugins) - Early loading plugins
+- [External Resources](/resources) - Community tools

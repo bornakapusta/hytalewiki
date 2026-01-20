@@ -7,6 +7,16 @@ description: Configure Gradle and dependencies for Hytale plugins
 
 **Prerequisites:** [Introduction](/introduction), Gradle installed
 
+## Plugin Template
+
+Start with a pre-configured template for the fastest setup. The template includes:
+- Gradle build configuration with shadow plugin
+- Correct Java 25 / Kotlin 2.3.0 settings
+- Example plugin structure
+- Auto-deploy to server plugins folder
+
+See [External Resources](/resources) for community template links.
+
 ## Step 1: Create Project Structure
 
 ```
@@ -171,6 +181,108 @@ eventRegistry.register(PlayerConnectEvent::class.java) { event -> ... }
 eventRegistry.register<PlayerConnectEvent> { event -> ... }
 ```
 
+## Recommended Folder Structure
+
+For larger plugins, organize your code:
+
+```
+my-plugin/
+├── build.gradle.kts
+├── settings.gradle.kts
+├── gradle.properties
+├── hytale_server/
+│   ├── HytaleServer.jar
+│   └── plugins/
+└── src/main/
+    ├── kotlin/com/example/myplugin/
+    │   ├── MyPlugin.kt           # Main plugin class
+    │   ├── commands/             # Command classes
+    │   │   └── StatsCommand.kt
+    │   ├── components/           # Custom components
+    │   │   └── PlayerStatsComponent.kt
+    │   ├── systems/              # ECS systems
+    │   │   └── StatsTrackingSystem.kt
+    │   ├── listeners/            # Event handlers
+    │   │   └── PlayerListener.kt
+    │   ├── services/             # Business logic
+    │   │   └── StatsService.kt
+    │   ├── storage/              # Data persistence
+    │   │   └── StatsStorage.kt
+    │   └── util/                 # Utilities
+    │       └── Extensions.kt
+    └── resources/
+        └── plugin.json
+```
+
+## Server Authentication
+
+The Hytale server requires authentication during development:
+
+1. **Get Server Access** - Obtain server credentials from Hytale
+2. **Configure Auth File** - Create `hytale_server/auth.json`:
+
+```json
+{
+    "token": "your-developer-token"
+}
+```
+
+3. **Environment Variable** (alternative):
+
+```bash
+export HYTALE_DEV_TOKEN="your-developer-token"
+```
+
+## Debug Mode Setup
+
+Enable debug mode for development:
+
+### Server Debug Flag
+
+Start server with debug flag:
+
+```bash
+java -Dhytale.debug=true -jar HytaleServer.jar
+```
+
+### Remote Debugging
+
+Attach a debugger from your IDE:
+
+```bash
+java -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005 \
+     -jar HytaleServer.jar
+```
+
+Then in IntelliJ:
+1. **Run > Edit Configurations**
+2. Add **Remote JVM Debug**
+3. Set host `localhost`, port `5005`
+4. Click Debug to attach
+
+### Gradle Debug Task
+
+Add to `build.gradle.kts`:
+
+```kotlin
+tasks.register<Exec>("runServerDebug") {
+    group = "hytale"
+    description = "Run server with debugger"
+    dependsOn("build")
+
+    workingDir = file("hytale_server")
+    commandLine = listOf(
+        "java",
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005",
+        "-Dhytale.debug=true",
+        "-Xmx4G",
+        "-jar", "HytaleServer.jar"
+    )
+}
+```
+
+Run with: `./gradlew runServerDebug`
+
 ## Troubleshooting
 
 **"Class file version 69" error:**
@@ -185,8 +297,14 @@ eventRegistry.register<PlayerConnectEvent> { event -> ... }
 - Use `implementation` for deps you need at runtime
 - Use shadow plugin to bundle them in JAR
 
+**Authentication failed:**
+- Verify token is valid and not expired
+- Check auth.json location and format
+
 ## Next Steps
 
 - [Your First Plugin](/your-first-plugin) - Complete walkthrough
 - [Handling Events](/handling-events) - React to game events
 - [Creating Commands](/creating-commands) - Add commands
+- [Gradle & Testing](/gradle-testing) - Advanced build setup
+- [External Resources](/resources) - Community tools and templates

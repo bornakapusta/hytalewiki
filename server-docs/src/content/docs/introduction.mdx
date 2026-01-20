@@ -26,7 +26,7 @@ The Hytale Server Plugin API lets you create custom game modes, events, and serv
 
 The server uses an **Entity Component System (ECS)** architecture:
 
-- **Entities** - Players, mobs, items are entities
+- **Entities** - Players, mobs, items are entities (just IDs)
 - **Components** - Data attached to entities (position, health, inventory)
 - **Systems** - Process entities with specific components each tick
 
@@ -36,8 +36,22 @@ Key concepts:
 - **Commands** are registered through `CommandRegistry`
 - **Tasks** can be scheduled for delayed or repeated execution
 
+### ECS Deep Dive
+
+Understanding ECS is critical for Hytale plugin development:
+
+- **Store** - Central database holding all entities and components
+- **Holder** - Blueprint for entity creation (configure before spawn)
+- **Ref** - Safe pointer to an entity (validated references)
+- **CommandBuffer** - Queue modifications for thread-safe execution
+- **Query** - Filter entities by component composition
+
+See [ECS Theory](/ecs-theory) for a complete guide to the architecture.
+
 ## Next Steps
 
 1. [Your First Plugin](/your-first-plugin) - Build a complete plugin from scratch
 2. [Project Setup](/project-setup) - Configure Gradle and dependencies
 3. [Handling Events](/handling-events) - Respond to player actions
+4. [ECS Theory](/ecs-theory) - Deep dive into Entity Component System
+5. [External Resources](/resources) - Community guides and tools

@@ -1,0 +1,530 @@
+---
+title: Production Patterns
+description: Architecture patterns for production-ready Hytale plugins
+---
+
+Production-grade patterns for building reliable, maintainable plugins.
+
+## Service-Storage Pattern
+
+Separate business logic (services) from data persistence (storage):
+
+```kotlin
+// Storage layer - handles persistence
+class PlayerDataStorage(private val plugin: JavaPlugin) {
+    private val dataDir = plugin.dataFolder.resolve("playerdata")
+
+    fun save(uuid: UUID, data: PlayerData) {
+        val file = dataDir.resolve("$uuid.json")
+        file.writeText(gson.toJson(data))
+    }
+
+    fun load(uuid: UUID): PlayerData? {
+        val file = dataDir.resolve("$uuid.json")
+        if (!file.exists()) return null
+        return gson.fromJson(file.readText(), PlayerData::class.java)
+    }
+
+    fun delete(uuid: UUID) {
+        dataDir.resolve("$uuid.json").delete()
+    }
+
+    fun loadAll(): Map<UUID, PlayerData> {
+        return dataDir.listFiles()
+            ?.filter { it.extension == "json" }
+            ?.associate { file ->
+                val uuid = UUID.fromString(file.nameWithoutExtension)
+                uuid to gson.fromJson(file.readText(), PlayerData::class.java)
+            } ?: emptyMap()
+    }
+}
+
+// Service layer - business logic
+class PlayerDataService(
+    private val storage: PlayerDataStorage,
+    private val cache: PlayerDataCache
+) {
+    fun getPlayerData(uuid: UUID): PlayerData {
+        // Check cache first
+        cache.get(uuid)?.let { return it }
+
+        // Load from storage
+        val data = storage.load(uuid) ?: PlayerData.default()
+        cache.put(uuid, data)
+        return data
+    }
+
+    fun updatePlayerData(uuid: UUID, update: (PlayerData) -> Unit) {
+        val data = getPlayerData(uuid)
+        update(data)
+        cache.put(uuid, data)
+        // Don't save immediately - use periodic saves
+    }
+
+    fun saveAll() {
+        cache.forEach { uuid, data ->
+            if (data.isDirty) {
+                storage.save(uuid, data)
+                data.isDirty = false
+            }
+        }
+    }
+}
+```
+
+## Thread Pool Management
+
+Offload work to background threads safely:
+
+```kotlin
+class AsyncTaskManager(private val plugin: JavaPlugin) {
+    private val executor = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors(),
+        ThreadFactory { r ->
+            Thread(r, "MyPlugin-Worker").apply { isDaemon = true }
+        }
+    )
+
+    private val scheduler = Executors.newSingleThreadScheduledExecutor()
+
+    fun <T> runAsync(task: () -> T): CompletableFuture<T> {
+        return CompletableFuture.supplyAsync(task, executor)
+    }
+
+    fun runOnMainThread(task: () -> Unit) {
+        plugin.server.scheduler.runTask(plugin) { task() }
+    }
+
+    fun <T> runAsyncThenSync(
+        asyncTask: () -> T,
+        syncCallback: (T) -> Unit
+    ) {
+        runAsync(asyncTask).thenAccept { result ->
+            runOnMainThread { syncCallback(result) }
+        }
+    }
+
+    fun shutdown() {
+        executor.shutdown()
+        scheduler.shutdown()
+
+        if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+            executor.shutdownNow()
+        }
+    }
+}
+```
+
+### Usage
+
+```kotlin
+// Database query off main thread
+asyncManager.runAsyncThenSync(
+    asyncTask = { database.queryLeaderboard(100) },
+    syncCallback = { leaderboard ->
+        // Back on main thread, safe to update game state
+        updateLeaderboardDisplay(leaderboard)
+    }
+)
+```
+
+## Singleton Pattern
+
+Thread-safe singleton for global services:
+
+```kotlin
+class GameManager private constructor() {
+    private val games = ConcurrentHashMap<String, Game>()
+
+    fun createGame(id: String, config: GameConfig): Game {
+        val game = Game(id, config)
+        games[id] = game
+        return game
+    }
+
+    fun getGame(id: String): Game? = games[id]
+
+    fun removeGame(id: String) {
+        games.remove(id)?.cleanup()
+    }
+
+    companion object {
+        @Volatile
+        private var instance: GameManager? = null
+
+        fun getInstance(): GameManager {
+            return instance ?: synchronized(this) {
+                instance ?: GameManager().also { instance = it }
+            }
+        }
+
+        // For testing - reset singleton
+        internal fun reset() {
+            instance = null
+        }
+    }
+}
+```
+
+### Dependency Injection Alternative
+
+For larger plugins, prefer DI over singletons:
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    lateinit var storage: PlayerDataStorage
+    lateinit var service: PlayerDataService
+    lateinit var cache: PlayerDataCache
+
+    override fun setup() {
+        // Wire up dependencies
+        cache = PlayerDataCache(maxSize = 1000)
+        storage = PlayerDataStorage(this)
+        service = PlayerDataService(storage, cache)
+
+        // Pass to commands/systems that need them
+        commandRegistry.registerCommand(StatsCommand(service))
+    }
+}
+```
+
+## Structured Logging
+
+Consistent, searchable logs:
+
+```kotlin
+object PluginLogger {
+    private lateinit var logger: FluentLogger
+
+    fun init(plugin: JavaPlugin) {
+        logger = plugin.logger
+    }
+
+    fun info(message: String, vararg args: Any) {
+        logger.atInfo().log(message, *args)
+    }
+
+    fun warn(message: String, vararg args: Any) {
+        logger.atWarning().log(message, *args)
+    }
+
+    fun error(message: String, throwable: Throwable? = null) {
+        if (throwable != null) {
+            logger.atSevere().withCause(throwable).log(message)
+        } else {
+            logger.atSevere().log(message)
+        }
+    }
+
+    // Structured logging with context
+    fun logEvent(event: String, data: Map<String, Any>) {
+        val json = gson.toJson(data)
+        logger.atInfo().log("EVENT $event $json")
+    }
+}
+
+// Usage
+PluginLogger.logEvent("player_join", mapOf(
+    "uuid" to player.uuid,
+    "name" to player.name,
+    "ip" to player.address
+))
+// Output: EVENT player_join {"uuid":"...","name":"Steve","ip":"..."}
+```
+
+## Periodic Save Pattern
+
+Batch saves to reduce I/O:
+
+```kotlin
+class PeriodicSaveManager(
+    private val plugin: JavaPlugin,
+    private val saveInterval: Long = 5 * 60 * 1000  // 5 minutes
+) {
+    private val saveables = mutableListOf<Saveable>()
+    private var saveTask: ScheduledFuture<*>? = null
+
+    interface Saveable {
+        fun save()
+        fun isDirty(): Boolean
+    }
+
+    fun register(saveable: Saveable) {
+        saveables.add(saveable)
+    }
+
+    fun start() {
+        saveTask = plugin.scheduler.scheduleAtFixedRate(
+            { saveAll() },
+            saveInterval,
+            saveInterval,
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    fun stop() {
+        saveTask?.cancel(false)
+        saveAll()  // Final save on shutdown
+    }
+
+    private fun saveAll() {
+        val dirty = saveables.filter { it.isDirty() }
+        if (dirty.isEmpty()) return
+
+        PluginLogger.info("Saving ${dirty.size} dirty objects...")
+        val start = System.currentTimeMillis()
+
+        dirty.forEach { it.save() }
+
+        val elapsed = System.currentTimeMillis() - start
+        PluginLogger.info("Save complete in ${elapsed}ms")
+    }
+}
+```
+
+### Usage in Plugin
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    private val saveManager = PeriodicSaveManager(this)
+
+    override fun setup() {
+        // Register things that need periodic saves
+        saveManager.register(playerDataService)
+        saveManager.register(economyService)
+        saveManager.register(arenaManager)
+    }
+
+    override fun start() {
+        saveManager.start()
+    }
+
+    override fun shutdown() {
+        saveManager.stop()  // Ensures final save
+    }
+}
+```
+
+## Cache with Expiration
+
+Auto-cleanup for memory efficiency:
+
+```kotlin
+class ExpiringCache<K, V>(
+    private val maxSize: Int = 1000,
+    private val ttlMs: Long = 10 * 60 * 1000  // 10 minutes
+) {
+    private data class CacheEntry<V>(
+        val value: V,
+        val expiry: Long
+    )
+
+    private val cache = ConcurrentHashMap<K, CacheEntry<V>>()
+
+    fun get(key: K): V? {
+        val entry = cache[key] ?: return null
+        if (System.currentTimeMillis() > entry.expiry) {
+            cache.remove(key)
+            return null
+        }
+        return entry.value
+    }
+
+    fun put(key: K, value: V) {
+        // Evict if over max size
+        if (cache.size >= maxSize) {
+            evictExpired()
+            if (cache.size >= maxSize) {
+                evictOldest()
+            }
+        }
+
+        cache[key] = CacheEntry(value, System.currentTimeMillis() + ttlMs)
+    }
+
+    fun remove(key: K) {
+        cache.remove(key)
+    }
+
+    fun clear() {
+        cache.clear()
+    }
+
+    private fun evictExpired() {
+        val now = System.currentTimeMillis()
+        cache.entries.removeIf { it.value.expiry < now }
+    }
+
+    private fun evictOldest() {
+        cache.entries
+            .sortedBy { it.value.expiry }
+            .take(cache.size / 4)  // Remove 25%
+            .forEach { cache.remove(it.key) }
+    }
+
+    // Schedule periodic cleanup
+    fun startCleanupTask(scheduler: ScheduledExecutorService) {
+        scheduler.scheduleAtFixedRate(
+            { evictExpired() },
+            ttlMs,
+            ttlMs,
+            TimeUnit.MILLISECONDS
+        )
+    }
+}
+```
+
+## Error Handling Pattern
+
+Graceful error handling that doesn't crash the server:
+
+```kotlin
+object SafeExecutor {
+    fun <T> execute(
+        operation: String,
+        default: T,
+        block: () -> T
+    ): T {
+        return try {
+            block()
+        } catch (e: Exception) {
+            PluginLogger.error("Failed to $operation", e)
+            default
+        }
+    }
+
+    fun executeVoid(operation: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Exception) {
+            PluginLogger.error("Failed to $operation", e)
+        }
+    }
+
+    suspend fun <T> executeSuspend(
+        operation: String,
+        default: T,
+        block: suspend () -> T
+    ): T {
+        return try {
+            block()
+        } catch (e: Exception) {
+            PluginLogger.error("Failed to $operation", e)
+            default
+        }
+    }
+}
+
+// Usage
+val data = SafeExecutor.execute("load player data", PlayerData.default()) {
+    storage.load(uuid) ?: PlayerData.default()
+}
+
+SafeExecutor.executeVoid("save player data") {
+    storage.save(uuid, data)
+}
+```
+
+## Event Debouncing
+
+Prevent rapid-fire event handling:
+
+```kotlin
+class EventDebouncer<T>(
+    private val delayMs: Long = 100,
+    private val scheduler: ScheduledExecutorService
+) {
+    private val pending = ConcurrentHashMap<Any, ScheduledFuture<*>>()
+
+    fun debounce(key: Any, event: T, handler: (T) -> Unit) {
+        // Cancel pending handler for this key
+        pending[key]?.cancel(false)
+
+        // Schedule new handler
+        pending[key] = scheduler.schedule(
+            {
+                pending.remove(key)
+                handler(event)
+            },
+            delayMs,
+            TimeUnit.MILLISECONDS
+        )
+    }
+}
+
+// Usage - debounce block break events per player
+val breakDebouncer = EventDebouncer<BreakBlockEvent>(delayMs = 50, scheduler)
+
+eventRegistry.register(BreakBlockEvent::class.java) { event ->
+    val uuid = getPlayerUuid(event.playerRef) ?: return@register
+
+    breakDebouncer.debounce(uuid, event) { e ->
+        // Only called once if player breaks many blocks quickly
+        updateBlockStats(e.playerRef)
+    }
+}
+```
+
+## State Machine Pattern
+
+For complex game states:
+
+```kotlin
+sealed class GameState {
+    object Waiting : GameState()
+    object Starting : GameState()
+    data class InProgress(val startTime: Long) : GameState()
+    data class Ending(val winner: Team) : GameState()
+    object Finished : GameState()
+}
+
+class GameStateMachine(private val game: Game) {
+    private var state: GameState = GameState.Waiting
+    private val listeners = mutableListOf<(GameState, GameState) -> Unit>()
+
+    fun transition(newState: GameState): Boolean {
+        val oldState = state
+
+        // Validate transition
+        if (!isValidTransition(oldState, newState)) {
+            PluginLogger.warn("Invalid state transition: $oldState -> $newState")
+            return false
+        }
+
+        state = newState
+        listeners.forEach { it(oldState, newState) }
+
+        // Handle state entry
+        when (newState) {
+            is GameState.Starting -> game.startCountdown()
+            is GameState.InProgress -> game.beginMatch()
+            is GameState.Ending -> game.announceWinner(newState.winner)
+            is GameState.Finished -> game.cleanup()
+            else -> {}
+        }
+
+        return true
+    }
+
+    private fun isValidTransition(from: GameState, to: GameState): Boolean {
+        return when (from) {
+            is GameState.Waiting -> to is GameState.Starting
+            is GameState.Starting -> to is GameState.InProgress || to is GameState.Waiting
+            is GameState.InProgress -> to is GameState.Ending
+            is GameState.Ending -> to is GameState.Finished
+            is GameState.Finished -> to is GameState.Waiting
+        }
+    }
+
+    fun onStateChange(listener: (GameState, GameState) -> Unit) {
+        listeners.add(listener)
+    }
+}
+```
+
+## See Also
+
+- [ECS Theory](/ecs-theory) - ECS architecture patterns
+- [Config Files](/config-files) - Configuration system
+- [Gradle & Testing](/gradle-testing) - Build and test setup
+- [Common Features](/common-features) - Utility implementations

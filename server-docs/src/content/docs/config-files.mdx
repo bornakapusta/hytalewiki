@@ -1,0 +1,374 @@
+---
+title: Config Files
+description: Create persistent configuration using the Codec system
+---
+
+Hytale provides a Codec-based configuration system for plugin settings. Configs are automatically serialized to JSON and loaded on startup.
+
+## Basic Config Class
+
+Create a config class with the `withConfig()` pattern:
+
+```kotlin
+import com.hypixel.hytale.shared.codec.BuilderCodec
+import com.hypixel.hytale.shared.codec.Codec
+import com.hypixel.hytale.shared.codec.KeyedCodec
+
+class MyPluginConfig {
+    var maxPlayers: Int = 20
+    var welcomeMessage: String = "Welcome to the server!"
+    var debugMode: Boolean = false
+
+    companion object {
+        val CODEC: BuilderCodec<MyPluginConfig> = BuilderCodec.builder(
+            MyPluginConfig::class.java,
+            { MyPluginConfig() }  // Default constructor
+        )
+            .append(
+                KeyedCodec("maxPlayers", Codec.INT),
+                { obj, value -> obj.maxPlayers = value },
+                { obj -> obj.maxPlayers }
+            )
+            .append(
+                KeyedCodec("welcomeMessage", Codec.STRING),
+                { obj, value -> obj.welcomeMessage = value },
+                { obj -> obj.welcomeMessage }
+            )
+            .append(
+                KeyedCodec("debugMode", Codec.BOOL),
+                { obj, value -> obj.debugMode = value },
+                { obj -> obj.debugMode }
+            )
+            .add()
+            .build()
+    }
+}
+```
+
+## Loading Config in Plugin
+
+Use `withConfig()` to load/create config:
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    lateinit var config: MyPluginConfig
+        private set
+
+    override fun setup() {
+        config = withConfig("config", MyPluginConfig.CODEC)
+
+        logger.atInfo().log("Max players: ${config.maxPlayers}")
+        logger.atInfo().log("Welcome: ${config.welcomeMessage}")
+    }
+}
+```
+
+This creates `plugins/MyPlugin/config.json`:
+
+```json
+{
+    "maxPlayers": 20,
+    "welcomeMessage": "Welcome to the server!",
+    "debugMode": false
+}
+```
+
+## Supported Data Types
+
+### Primitive Types
+
+| Type | Codec | Example |
+|------|-------|---------|
+| Int | `Codec.INT` | `42` |
+| Long | `Codec.LONG` | `1234567890L` |
+| Float | `Codec.FLOAT` | `3.14f` |
+| Double | `Codec.DOUBLE` | `3.14159` |
+| Boolean | `Codec.BOOL` | `true` |
+| String | `Codec.STRING` | `"hello"` |
+
+### Collections
+
+```kotlin
+// List of strings
+.append(
+    KeyedCodec("allowedWorlds", Codec.STRING.listOf()),
+    { obj, value -> obj.allowedWorlds = value.toMutableList() },
+    { obj -> obj.allowedWorlds }
+)
+
+// List of integers
+.append(
+    KeyedCodec("spawnPoints", Codec.INT.listOf()),
+    { obj, value -> obj.spawnPoints = value.toMutableList() },
+    { obj -> obj.spawnPoints }
+)
+```
+
+### Optional Fields
+
+```kotlin
+// Optional with default
+.append(
+    KeyedCodec("optionalField", Codec.STRING).optional("default value"),
+    { obj, value -> obj.optionalField = value },
+    { obj -> obj.optionalField }
+)
+
+// Nullable optional
+.append(
+    KeyedCodec("nullableField", Codec.STRING).optionalNullable(),
+    { obj, value -> obj.nullableField = value },
+    { obj -> obj.nullableField }
+)
+```
+
+### Nested Objects
+
+```kotlin
+class DatabaseConfig {
+    var host: String = "localhost"
+    var port: Int = 3306
+    var database: String = "hytale"
+
+    companion object {
+        val CODEC: BuilderCodec<DatabaseConfig> = BuilderCodec.builder(
+            DatabaseConfig::class.java,
+            { DatabaseConfig() }
+        )
+            .append(KeyedCodec("host", Codec.STRING),
+                { obj, v -> obj.host = v }, { obj -> obj.host })
+            .append(KeyedCodec("port", Codec.INT),
+                { obj, v -> obj.port = v }, { obj -> obj.port })
+            .append(KeyedCodec("database", Codec.STRING),
+                { obj, v -> obj.database = v }, { obj -> obj.database })
+            .add()
+            .build()
+    }
+}
+
+// In main config
+class MyPluginConfig {
+    var database: DatabaseConfig = DatabaseConfig()
+
+    companion object {
+        val CODEC: BuilderCodec<MyPluginConfig> = BuilderCodec.builder(
+            MyPluginConfig::class.java,
+            { MyPluginConfig() }
+        )
+            .append(
+                KeyedCodec("database", DatabaseConfig.CODEC),
+                { obj, v -> obj.database = v },
+                { obj -> obj.database }
+            )
+            .add()
+            .build()
+    }
+}
+```
+
+Result:
+
+```json
+{
+    "database": {
+        "host": "localhost",
+        "port": 3306,
+        "database": "hytale"
+    }
+}
+```
+
+### Enums
+
+```kotlin
+enum class GameMode {
+    SURVIVAL, CREATIVE, ADVENTURE
+}
+
+// Use Codec.ofEnum
+.append(
+    KeyedCodec("gameMode", Codec.ofEnum(GameMode::class.java)),
+    { obj, v -> obj.gameMode = v },
+    { obj -> obj.gameMode }
+)
+```
+
+### Maps
+
+```kotlin
+// String to Int map
+var prices: MutableMap<String, Int> = mutableMapOf()
+
+.append(
+    KeyedCodec("prices", Codec.unboundedMap(Codec.STRING, Codec.INT)),
+    { obj, v -> obj.prices = v.toMutableMap() },
+    { obj -> obj.prices }
+)
+```
+
+## Multiple Config Files
+
+Load multiple configs for organization:
+
+```kotlin
+class MyPlugin(init: JavaPluginInit) : JavaPlugin(init) {
+    lateinit var mainConfig: MainConfig
+    lateinit var messagesConfig: MessagesConfig
+    lateinit var rewardsConfig: RewardsConfig
+
+    override fun setup() {
+        mainConfig = withConfig("config", MainConfig.CODEC)
+        messagesConfig = withConfig("messages", MessagesConfig.CODEC)
+        rewardsConfig = withConfig("rewards", RewardsConfig.CODEC)
+    }
+}
+```
+
+Creates:
+```
+plugins/MyPlugin/
+├── config.json
+├── messages.json
+└── rewards.json
+```
+
+## Reloading Config
+
+Implement a reload command:
+
+```kotlin
+class ReloadCommand(private val plugin: MyPlugin) :
+    AbstractCommand("reload", "Reload plugin config") {
+
+    override fun execute(context: CommandContext) {
+        // Re-read config file
+        plugin.config = plugin.withConfig("config", MyPluginConfig.CODEC)
+        context.sendMessage(Message.raw("Config reloaded!"))
+    }
+}
+```
+
+## Validation
+
+Add validation in your config class:
+
+```kotlin
+class MyPluginConfig {
+    var maxPlayers: Int = 20
+        set(value) {
+            field = value.coerceIn(1, 100)  // Clamp to valid range
+        }
+
+    var tickRate: Int = 20
+        set(value) {
+            field = if (value > 0) value else 20  // Must be positive
+        }
+}
+```
+
+Or validate after loading:
+
+```kotlin
+override fun setup() {
+    config = withConfig("config", MyPluginConfig.CODEC)
+
+    // Validate
+    if (config.maxPlayers < 1) {
+        logger.atWarning().log("Invalid maxPlayers, using default")
+        config.maxPlayers = 20
+    }
+}
+```
+
+## Best Practices
+
+### Provide Sensible Defaults
+
+```kotlin
+class MyPluginConfig {
+    // Always initialize with working defaults
+    var maxPlayers: Int = 20
+    var tickInterval: Int = 20
+    var enableFeature: Boolean = true
+}
+```
+
+### Document Config Options
+
+Add comments in code (JSON doesn't support comments):
+
+```kotlin
+class MyPluginConfig {
+    /** Maximum players allowed in arena (1-100) */
+    var maxPlayers: Int = 20
+
+    /** Tick interval for updates (higher = less frequent) */
+    var tickInterval: Int = 20
+}
+```
+
+### Group Related Settings
+
+```kotlin
+class MyPluginConfig {
+    var arena: ArenaConfig = ArenaConfig()
+    var economy: EconomyConfig = EconomyConfig()
+    var messages: MessagesConfig = MessagesConfig()
+}
+```
+
+### Use Constants for Keys
+
+```kotlin
+companion object {
+    private const val KEY_MAX_PLAYERS = "maxPlayers"
+    private const val KEY_WELCOME = "welcomeMessage"
+
+    val CODEC: BuilderCodec<MyPluginConfig> = BuilderCodec.builder(...)
+        .append(KeyedCodec(KEY_MAX_PLAYERS, Codec.INT), ...)
+        .append(KeyedCodec(KEY_WELCOME, Codec.STRING), ...)
+}
+```
+
+## Complete Example
+
+```kotlin
+class ArenaConfig {
+    var name: String = "Default Arena"
+    var minPlayers: Int = 2
+    var maxPlayers: Int = 16
+    var countdownSeconds: Int = 30
+    var matchDurationMinutes: Int = 10
+    var allowSpectators: Boolean = true
+    var spawnPoints: MutableList<String> = mutableListOf()
+
+    companion object {
+        val CODEC: BuilderCodec<ArenaConfig> = BuilderCodec.builder(
+            ArenaConfig::class.java,
+            { ArenaConfig() }
+        )
+            .append(KeyedCodec("name", Codec.STRING),
+                { o, v -> o.name = v }, { o -> o.name })
+            .append(KeyedCodec("minPlayers", Codec.INT),
+                { o, v -> o.minPlayers = v }, { o -> o.minPlayers })
+            .append(KeyedCodec("maxPlayers", Codec.INT),
+                { o, v -> o.maxPlayers = v }, { o -> o.maxPlayers })
+            .append(KeyedCodec("countdownSeconds", Codec.INT),
+                { o, v -> o.countdownSeconds = v }, { o -> o.countdownSeconds })
+            .append(KeyedCodec("matchDurationMinutes", Codec.INT),
+                { o, v -> o.matchDurationMinutes = v }, { o -> o.matchDurationMinutes })
+            .append(KeyedCodec("allowSpectators", Codec.BOOL),
+                { o, v -> o.allowSpectators = v }, { o -> o.allowSpectators })
+            .append(KeyedCodec("spawnPoints", Codec.STRING.listOf()),
+                { o, v -> o.spawnPoints = v.toMutableList() }, { o -> o.spawnPoints })
+            .add()
+            .build()
+    }
+}
+```
+
+## See Also
+
+- [Project Setup](/project-setup) - Plugin structure
+- [Custom Components](/custom-components) - Codecs for components
+- [External Resources](/resources) - Community guides

@@ -1,0 +1,102 @@
+---
+title: External Resources
+description: Community guides, tutorials, and tools for Hytale plugin development
+---
+
+Community resources for learning Hytale plugin development. These external guides complement the official documentation.
+
+## Official Resources
+
+- [Hytale](https://hytale.com) - Official game website
+- [Hytale Blog](https://hytale.com/news) - Development updates and announcements
+
+## Community Guides
+
+### Hytale Modding Dev
+
+Comprehensive ECS and plugin development guides.
+
+- **ECS Architecture Guide** - Deep dive into Entity Component System
+- **System Types Reference** - All system types explained
+- **Component Patterns** - Best practices for components
+
+[Visit hytalemodding.dev](https://hytalemodding.dev)
+
+### Britakee Studios Documentation
+
+Production-ready plugin development patterns.
+
+- **Plugin Development Guide** - Complete getting started tutorial
+- **Configuration System** - Codec-based config files
+- **Bootstrap Plugins** - Early loading plugins
+- **Advanced Patterns** - Production architecture
+
+[Visit britakee-studios.gitbook.io](https://britakee-studios.gitbook.io)
+
+## Templates
+
+### Plugin Template
+
+Starter project with recommended structure:
+
+```
+my-plugin/
+├── build.gradle.kts      # Pre-configured Gradle build
+├── settings.gradle.kts
+├── gradle.properties     # Java 25 target
+├── buildSrc/             # Custom Gradle plugin (optional)
+├── hytale_server/
+│   └── HytaleServer.jar
+└── src/
+    └── main/
+        ├── kotlin/
+        │   └── com/example/myplugin/
+        └── resources/
+            └── plugin.json
+```
+
+Key features:
+- Shadow JAR packaging
+- Automatic copy to plugins folder
+- Kotlin 2.3.0 configured
+- Java 25 compatibility
+
+## Tools
+
+### Development Tools
+
+| Tool | Purpose |
+|------|---------|
+| IntelliJ IDEA | Recommended IDE with Kotlin support |
+| Gradle | Build tool for compiling plugins |
+| Shadow Plugin | JAR packaging with dependencies |
+| Fernflower | Decompiler for reference |
+
+### Debugging
+
+- **Remote Debugging** - Attach IntelliJ to running server
+- **Hot Reload** - Some changes without restart (limited)
+- **Server Logs** - `logs/latest.log` for errors
+
+## Community
+
+### Discord Servers
+
+Join community discussions:
+- Hytale Official Discord
+- Hytale Modding community servers
+
+### GitHub
+
+- Report issues and contribute to community projects
+- Share your plugins with the community
+
+## Contributing
+
+Have a resource to add? The Hytale plugin development community is growing. Share your guides, tools, and templates to help others.
+
+## See Also
+
+- [Introduction](/introduction) - Getting started
+- [Project Setup](/project-setup) - Configure your development environment
+- [ECS Theory](/ecs-theory) - Deep dive into ECS architecture

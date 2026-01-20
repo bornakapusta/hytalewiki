@@ -1,0 +1,336 @@
+---
+title: ECS Theory
+description: Deep dive into Hytale's Entity Component System architecture
+---
+
+Hytale uses an Entity Component System (ECS) architecture for game logic. Understanding ECS is essential for writing performant plugins.
+
+## Why ECS?
+
+Traditional OOP uses inheritance hierarchies:
+
+```
+Entity
+├── LivingEntity
+│   ├── Player
+│   └── Monster
+└── Item
+```
+
+Problems:
+- Deep inheritance = rigid, hard to change
+- "Diamond problem" with multiple inheritance
+- Data scattered across class hierarchy
+
+ECS uses **composition over inheritance**:
+
+```
+Entity = ID + Components
+├── Player Entity: [Transform, Health, Inventory, Player]
+├── Monster Entity: [Transform, Health, AI, Monster]
+└── Item Entity: [Transform, ItemData]
+```
+
+Benefits:
+- Flexible composition at runtime
+- Cache-friendly data layout
+- Parallel processing friendly
+- Easy to add/remove behaviors
+
+## Core Concepts
+
+### Store
+
+The `Store` is the central database holding all entities and components:
+
+```kotlin
+// EntityStore for world entities
+val store: Store<EntityStore> = world.entityStore.store
+
+// ChunkStore for block/terrain data
+val chunkStore: Store<ChunkStore> = world.chunkStore
+```
+
+Store types:
+- **EntityStore** - Players, mobs, items, projectiles
+- **ChunkStore** - Terrain, blocks, chunk-level data
+
+### Entity
+
+An entity is just an ID—no data, no behavior. Components provide both.
+
+```kotlin
+// Entity reference (safe pointer)
+val ref: Ref<EntityStore> = chunk.getRef(index)
+
+// Entity ID (raw identifier)
+val id: Int = ref.id
+```
+
+### Component
+
+Components are pure data containers:
+
+```kotlin
+class HealthComponent : Component<EntityStore> {
+    var current: Float = 100f
+    var max: Float = 100f
+
+    override fun clone() = HealthComponent().also {
+        it.current = current
+        it.max = max
+    }
+    override fun cloneSerializable() = clone()
+}
+```
+
+Components should:
+- Contain only data, no logic
+- Be cloneable for serialization
+- Have a registered ComponentType
+
+### System
+
+Systems contain logic that processes entities with specific components:
+
+```kotlin
+class HealthRegenSystem : EntityTickingSystem<EntityStore>() {
+    override fun getQuery() = Query.and(HealthComponentType, RegenComponentType)
+
+    override fun tick(deltaTime: Float, tick: Int, index: Int,
+                      chunk: ArchetypeChunk<EntityStore>,
+                      store: Store<EntityStore>,
+                      buffer: CommandBuffer<EntityStore>) {
+        val health = chunk.getComponent(index, HealthComponentType)
+        val regen = chunk.getComponent(index, RegenComponentType)
+
+        health.current = minOf(health.current + regen.rate * deltaTime, health.max)
+    }
+}
+```
+
+## Holder Pattern
+
+**Holders** are blueprints for entities before they exist in the world. Use holders to configure components before spawning:
+
+```kotlin
+// Create holder (blueprint)
+val holder = Holder<EntityStore>()
+
+// Add components to blueprint
+holder.addComponent(TransformComponentType, TransformComponent().apply {
+    position.set(x, y, z)
+})
+holder.addComponent(HealthComponentType, HealthComponent().apply {
+    max = 200f
+    current = 200f
+})
+holder.addComponent(CustomTagComponentType, CustomTagComponent())
+
+// Spawn entity from holder
+val ref = buffer.addEntity(holder)
+```
+
+Why holders?
+- Configure all components before insertion
+- Atomic entity creation (all-or-nothing)
+- Avoids incomplete entity states
+- Can be reused as templates
+
+### PlayerConnectEvent Holder
+
+Players use holders during connection:
+
+```kotlin
+eventRegistry.register(PlayerConnectEvent::class.java) { event ->
+    val holder = event.holder  // Pre-spawn holder
+
+    // Add custom components before player enters world
+    holder.addComponent(MyStatsType, MyStatsComponent())
+    holder.addComponent(MySettingsType, MySettingsComponent())
+}
+```
+
+## Ref Pattern
+
+**Ref** (Reference) is a safe pointer to an entity. Unlike raw IDs, refs are validated:
+
+```kotlin
+// Get ref from chunk iteration
+val ref: Ref<EntityStore> = chunk.getRef(index)
+
+// Check if entity still exists
+if (store.isValid(ref)) {
+    val health = store.getComponent(ref, HealthComponentType)
+}
+
+// Refs can become invalid if entity is removed
+```
+
+### PlayerRef vs Player Component
+
+Two ways to reference players:
+
+```kotlin
+// PlayerRef - Safe reference to player entity
+val playerRef: PlayerRef = event.playerRef
+
+// Can get holder from PlayerRef
+val holder = playerRef.holder
+
+// Player component - Data about the player
+val player: Player? = holder?.getComponent(PlayerComponentType)
+player?.let {
+    val uuid = it.uuid
+    val name = it.name
+}
+```
+
+Use `PlayerRef` when:
+- Passing player references between systems
+- Storing references for later use
+- Need to check if player still exists
+
+Use `Player` component when:
+- Accessing player data (UUID, name)
+- Checking player-specific properties
+
+## CommandBuffer
+
+**CommandBuffer** queues modifications for thread-safe execution:
+
+```kotlin
+override fun tick(deltaTime: Float, tick: Int,
+                  store: Store<EntityStore>,
+                  buffer: CommandBuffer<EntityStore>) {
+    // DON'T modify store directly during iteration
+    // store.removeEntity(ref)  // BAD - concurrent modification
+
+    // DO queue modifications via buffer
+    buffer.removeEntity(ref, RemoveReason.REMOVE)  // GOOD
+    buffer.addComponent(ref, PoisonType, PoisonComponent())  // GOOD
+    buffer.setComponent(ref, HealthType, newHealth)  // GOOD
+}
+```
+
+CommandBuffer operations:
+- `addEntity(holder)` - Spawn entity
+- `removeEntity(ref, reason)` - Despawn entity
+- `addComponent(ref, type, component)` - Add component
+- `removeComponent(ref, type)` - Remove component
+- `setComponent(ref, type, component)` - Replace component
+
+Why buffers?
+- Safe concurrent modification
+- Batched execution (performance)
+- Maintains store consistency
+
+## Query System
+
+Queries filter entities by component composition:
+
+```kotlin
+// Single component
+val query = HealthComponentType
+
+// AND - must have all
+val query = Query.and(HealthComponentType, TransformComponentType)
+
+// OR - must have any
+val query = Query.or(PlayerComponentType, MonsterComponentType)
+
+// NOT - must not have
+val query = Query.and(
+    HealthComponentType,
+    Query.not(InvulnerableComponentType)
+)
+
+// Complex composition
+val query = Query.and(
+    Query.or(PlayerComponentType, MonsterComponentType),
+    HealthComponentType,
+    Query.not(DeadComponentType)
+)
+```
+
+### Archetype Chunks
+
+Entities with the same component set share an **Archetype**. Iteration happens over archetype chunks:
+
+```kotlin
+for (chunk in store.getChunks(query)) {
+    for (i in 0 until chunk.size()) {
+        val ref = chunk.getRef(i)
+        val health = chunk.getComponent(i, HealthComponentType)
+        // Process entity...
+    }
+}
+```
+
+Why archetypes?
+- Cache-friendly memory layout
+- Components of same type are contiguous
+- Fast iteration over matching entities
+
+## Resource Pattern
+
+**Resources** are singleton data not attached to entities:
+
+```kotlin
+class GameStateResource : Resource<EntityStore> {
+    var phase: GamePhase = GamePhase.LOBBY
+    var timeRemaining: Int = 0
+    var scores: MutableMap<Team, Int> = mutableMapOf()
+}
+
+// Access in system
+override fun tick(deltaTime: Float, tick: Int, store: Store<EntityStore>,
+                  buffer: CommandBuffer<EntityStore>) {
+    val gameState = buffer.getResource(GameStateResourceType)
+
+    if (gameState.phase == GamePhase.ACTIVE) {
+        gameState.timeRemaining--
+    }
+}
+```
+
+Resources vs Components:
+- **Component** - Per-entity data (health, position)
+- **Resource** - Global/singleton data (time, weather, game state)
+
+## Best Practices
+
+### Do
+- Keep components small and focused
+- Use marker components (empty) for tags
+- Process entities in batches when possible
+- Use CommandBuffer for all modifications
+
+### Don't
+- Put logic in components
+- Store entity references long-term (they can become invalid)
+- Modify store directly during iteration
+- Create deep component hierarchies
+
+### Performance Tips
+
+```kotlin
+// GOOD: Process in batches
+for (chunk in store.getChunks(query)) {
+    for (i in 0 until chunk.size()) {
+        // Process...
+    }
+}
+
+// BAD: Individual entity lookups
+for (ref in entityList) {
+    val component = store.getComponent(ref, Type)  // Cache miss per entity
+}
+```
+
+## See Also
+
+- [Custom Components](/custom-components) - Create your own components
+- [System Types](/system-types) - All system types reference
+- [Advanced ECS](/advanced-ecs) - Advanced patterns
+- [External Resources](/resources) - Community ECS guides

@@ -1,0 +1,323 @@
+---
+title: Bootstrap Plugins
+description: Early-loading plugins for bytecode transformation and core modifications
+---
+
+Bootstrap plugins load before the main server initialization, enabling bytecode transformation and core system modifications.
+
+## What Are Bootstrap Plugins?
+
+Bootstrap plugins are special plugins that:
+- Load before normal plugins
+- Can transform server bytecode
+- Have access to early initialization hooks
+- Run before worlds and players exist
+
+```
+Server Startup
+├── 1. JVM starts
+├── 2. Bootstrap plugins load ← Early access
+├── 3. Server core initializes
+├── 4. Normal plugins load
+└── 5. Worlds load, accept players
+```
+
+## When to Use Bootstrap Plugins
+
+**Good use cases:**
+- Bytecode transformation / ASM manipulation
+- Adding new packet types to the protocol
+- Modifying core server behavior
+- Custom class loaders
+- Performance instrumentation
+
+**Bad use cases (use normal plugins instead):**
+- Commands and events
+- Player interactions
+- Game logic
+- Anything that doesn't need early access
+
+## Creating a Bootstrap Plugin
+
+### Service Loader Pattern
+
+Bootstrap plugins use Java's `ServiceLoader`:
+
+```kotlin
+// 1. Implement the bootstrap interface
+class MyBootstrapPlugin : BootstrapPlugin {
+    override fun onBootstrap(context: BootstrapContext) {
+        context.logger.info("Bootstrap plugin loading...")
+
+        // Register transformers, modify core systems
+        context.registerTransformer(MyClassTransformer())
+    }
+
+    override fun getPriority(): Int = 100  // Higher = loads first
+}
+```
+
+### Service Registration
+
+Create `src/main/resources/META-INF/services/com.hypixel.hytale.server.bootstrap.BootstrapPlugin`:
+
+```
+com.example.myplugin.MyBootstrapPlugin
+```
+
+### Plugin Manifest
+
+Add bootstrap flag to `plugin.json`:
+
+```json
+{
+    "name": "MyBootstrapPlugin",
+    "group": "com.example",
+    "version": "1.0.0",
+    "main": "com.example.myplugin.MyPlugin",
+    "bootstrap": true,
+    "bootstrapClass": "com.example.myplugin.MyBootstrapPlugin"
+}
+```
+
+## Priority System
+
+Bootstrap plugins load in priority order:
+
+```kotlin
+class HighPriorityBootstrap : BootstrapPlugin {
+    override fun getPriority(): Int = 1000  // Loads first
+}
+
+class MediumPriorityBootstrap : BootstrapPlugin {
+    override fun getPriority(): Int = 500   // Loads second
+}
+
+class LowPriorityBootstrap : BootstrapPlugin {
+    override fun getPriority(): Int = 100   // Loads last
+}
+```
+
+Priority guidelines:
+- `1000+` - Core system modifications
+- `500-999` - Major transformations
+- `100-499` - Minor modifications
+- `1-99` - Observation/logging only
+
+## Bytecode Transformation
+
+Use ASM for bytecode manipulation:
+
+```kotlin
+class MyClassTransformer : ClassTransformer {
+    override fun shouldTransform(className: String): Boolean {
+        // Only transform specific classes
+        return className.startsWith("com/hypixel/hytale/server/core/entity")
+    }
+
+    override fun transform(
+        className: String,
+        classBytes: ByteArray
+    ): ByteArray {
+        val reader = ClassReader(classBytes)
+        val writer = ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
+        val visitor = MyClassVisitor(writer)
+
+        reader.accept(visitor, 0)
+        return writer.toByteArray()
+    }
+}
+
+class MyClassVisitor(cv: ClassVisitor) : ClassVisitor(Opcodes.ASM9, cv) {
+    override fun visitMethod(
+        access: Int,
+        name: String,
+        descriptor: String,
+        signature: String?,
+        exceptions: Array<String>?
+    ): MethodVisitor {
+        val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
+
+        if (name == "targetMethod") {
+            return MyMethodVisitor(mv)
+        }
+        return mv
+    }
+}
+```
+
+## Restrictions and Warnings
+
+### Things You Cannot Do
+
+```kotlin
+class MyBootstrapPlugin : BootstrapPlugin {
+    override fun onBootstrap(context: BootstrapContext) {
+        // ❌ NO: Access players (none exist yet)
+        // server.onlinePlayers
+
+        // ❌ NO: Access worlds (not loaded yet)
+        // server.worlds
+
+        // ❌ NO: Register commands (registry not ready)
+        // commandRegistry.register(...)
+
+        // ❌ NO: Register events on game events
+        // eventRegistry.register(PlayerJoinEvent...)
+    }
+}
+```
+
+### Things You Can Do
+
+```kotlin
+class MyBootstrapPlugin : BootstrapPlugin {
+    override fun onBootstrap(context: BootstrapContext) {
+        // ✅ YES: Log messages
+        context.logger.info("Loading...")
+
+        // ✅ YES: Register transformers
+        context.registerTransformer(MyTransformer())
+
+        // ✅ YES: Modify static configuration
+        ServerConfig.maxPlayers = 100
+
+        // ✅ YES: Load resources
+        val config = loadConfig()
+
+        // ✅ YES: Register bootstrap-phase hooks
+        context.onServerInit { server ->
+            // Called when server object is created
+        }
+    }
+}
+```
+
+## Warning System
+
+The server warns about suspicious bootstrap activity:
+
+```
+[WARN] Bootstrap plugin 'MyPlugin' accessed restricted API: PlayerManager
+[WARN] Bootstrap plugin 'MyPlugin' attempted to register command before server init
+[ERROR] Bootstrap plugin 'MyPlugin' threw exception, disabling...
+```
+
+### Safe Bootstrap Pattern
+
+```kotlin
+class SafeBootstrapPlugin : BootstrapPlugin {
+    private lateinit var pendingSetup: () -> Unit
+
+    override fun onBootstrap(context: BootstrapContext) {
+        // Only do bootstrap-safe operations
+        context.registerTransformer(MyTransformer())
+
+        // Defer other setup to after server init
+        context.onServerInit { server ->
+            server.pluginManager.getPlugin("MyPlugin")?.let { plugin ->
+                // Now safe to do normal plugin operations
+                setupCommands(plugin)
+                setupEvents(plugin)
+            }
+        }
+    }
+}
+```
+
+## Example: Packet Logger
+
+Log all network packets for debugging:
+
+```kotlin
+class PacketLoggerBootstrap : BootstrapPlugin {
+    override fun onBootstrap(context: BootstrapContext) {
+        context.logger.info("Installing packet logger...")
+        context.registerTransformer(PacketHandlerTransformer())
+    }
+
+    override fun getPriority(): Int = 50  // Low priority, observes only
+}
+
+class PacketHandlerTransformer : ClassTransformer {
+    override fun shouldTransform(className: String): Boolean {
+        return className == "com/hypixel/hytale/server/network/PacketHandler"
+    }
+
+    override fun transform(className: String, classBytes: ByteArray): ByteArray {
+        // Add logging to packet handling methods
+        // ... ASM transformation code ...
+    }
+}
+```
+
+## Example: Custom Protocol Extension
+
+Add custom packet types:
+
+```kotlin
+class CustomProtocolBootstrap : BootstrapPlugin {
+    override fun onBootstrap(context: BootstrapContext) {
+        context.logger.info("Registering custom packets...")
+
+        context.onServerInit { server ->
+            // Register custom packets after protocol is initialized
+            val registry = server.packetRegistry
+            registry.register(0xFF01, CustomDataPacket::class.java)
+            registry.register(0xFF02, CustomSyncPacket::class.java)
+        }
+    }
+
+    override fun getPriority(): Int = 800
+}
+```
+
+## Debugging Bootstrap Plugins
+
+### Enable Debug Logging
+
+```bash
+java -Dhytale.bootstrap.debug=true -jar HytaleServer.jar
+```
+
+### Bootstrap Load Order
+
+Check load order with:
+
+```kotlin
+override fun onBootstrap(context: BootstrapContext) {
+    context.logger.info("Bootstrap load order: ${context.loadOrder}")
+    context.logger.info("Already loaded: ${context.loadedPlugins}")
+}
+```
+
+### Common Issues
+
+**Plugin not loading:**
+- Check `META-INF/services` file exists
+- Verify class name in services file is correct
+- Ensure JAR is in plugins folder
+
+**Transformation not applying:**
+- Verify `shouldTransform` returns true for target class
+- Check class is loaded after your transformer registers
+- Use debug logging to trace transformation
+
+**Server crashes on start:**
+- Bootstrap errors are often fatal
+- Check logs for stack traces
+- Test transformations on specific classes first
+
+## Best Practices
+
+1. **Minimize bootstrap code** - Only do what requires early access
+2. **Use normal plugins when possible** - Bootstrap is harder to debug
+3. **Test thoroughly** - Bootstrap errors crash the server
+4. **Document transformations** - Others need to understand what you changed
+5. **Version check** - Server updates may break transformations
+
+## See Also
+
+- [Project Setup](/project-setup) - Plugin project structure
+- [Advanced Patterns](/advanced-patterns) - Production architecture
+- [Gradle & Testing](/gradle-testing) - Build and test setup

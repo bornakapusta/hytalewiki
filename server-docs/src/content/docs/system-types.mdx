@@ -581,6 +581,147 @@ public class MySystem extends TickingSystem<EntityStore> {
 }
 ```
 
+### Dependency Types
+
+| Type | Description |
+|------|-------------|
+| `SystemTypeDependency` | Order relative to another system type |
+| `ComponentDependency` | Order based on component access (read/write) |
+| `ResourceDependency` | Order based on resource access |
+
+### Circular Dependencies
+
+The system scheduler detects circular dependencies:
+
+```java
+// ERROR: A depends on B, B depends on A
+class SystemA extends TickingSystem<EntityStore> {
+    public Set<Dependency<EntityStore>> getDependencies() {
+        return Set.of(new SystemTypeDependency<>(Order.AFTER, SystemBType));
+    }
+}
+
+class SystemB extends TickingSystem<EntityStore> {
+    public Set<Dependency<EntityStore>> getDependencies() {
+        return Set.of(new SystemTypeDependency<>(Order.AFTER, SystemAType));
+    }
+}
+// Server will fail to start with circular dependency error
+```
+
+## System Groups
+
+Group related systems for organization and batch control:
+
+```java
+public class CombatSystemGroup extends SystemGroup<EntityStore> {
+    public CombatSystemGroup() {
+        super("combat");
+    }
+
+    @Override
+    public void registerSystems(SystemRegistry<EntityStore> registry) {
+        registry.registerSystem(new DamageCalculationSystem());
+        registry.registerSystem(new HealthUpdateSystem());
+        registry.registerSystem(new DeathCheckSystem());
+        registry.registerSystem(new RespawnSystem());
+    }
+
+    @Override
+    public Set<Dependency<EntityStore>> getDependencies() {
+        // Entire group runs after physics
+        return Set.of(new SystemTypeDependency<>(Order.AFTER, PhysicsSystemType));
+    }
+}
+```
+
+### Enabling/Disabling Groups
+
+```java
+// Disable combat during lobby phase
+systemRegistry.setGroupEnabled("combat", false);
+
+// Re-enable when match starts
+systemRegistry.setGroupEnabled("combat", true);
+```
+
+## Query Composition
+
+Queries filter entities by component composition using boolean logic.
+
+### Basic Queries
+
+```java
+// Single component
+Query<EntityStore> q = HealthComponentType;
+
+// All entities
+Query<EntityStore> q = Query.any();
+```
+
+### AND Queries
+
+Entity must have all specified components:
+
+```java
+// Must have Health AND Transform AND NOT Dead
+Query<EntityStore> q = Query.and(
+    HealthComponentType,
+    TransformComponentType,
+    Query.not(DeadComponentType)
+);
+```
+
+### OR Queries
+
+Entity must have at least one of the specified components:
+
+```java
+// Must have Player OR Monster (anything damageable)
+Query<EntityStore> q = Query.or(
+    PlayerComponentType,
+    MonsterComponentType
+);
+```
+
+### NOT Queries
+
+Entity must NOT have the specified component:
+
+```java
+// Must have Health but NOT be Invulnerable
+Query<EntityStore> q = Query.and(
+    HealthComponentType,
+    Query.not(InvulnerableComponentType)
+);
+```
+
+### Complex Composition
+
+```java
+// (Player OR Monster) AND Health AND NOT Dead AND NOT Invulnerable
+Query<EntityStore> q = Query.and(
+    Query.or(PlayerComponentType, MonsterComponentType),
+    HealthComponentType,
+    Query.not(DeadComponentType),
+    Query.not(InvulnerableComponentType)
+);
+```
+
+### Query Performance
+
+```java
+// GOOD: Specific query, fewer entities to iterate
+Query.and(PlayerComponentType, InCombatComponentType)
+
+// BAD: Broad query, many entities
+Query.any()
+
+// TIP: Use marker components to narrow queries
+// Add "InCombat" component only during combat
+// Then query for it specifically
+```
+
 ## See Also
 
 - [ECS Components](/ecs-components) - Core ECS architecture
